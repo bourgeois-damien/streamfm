@@ -26,7 +26,10 @@ However, we recommend to instead use `config/streamfm_melflow.yaml` matching the
   conda create -n streamfm python=3.10 -c conda-forge
   ```
 - Activate your virtual environment, e.g. `conda activate streamfm`
-- Install the dependencies via `pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128`,
+- Install the dependencies via
+  ```bash
+  pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
+  ```
   where you should replace the `--extra-index-url` parameter to match your local CUDA installation, see [the PyTorch instructions](https://pytorch.org/get-started/locally/).
 
 
