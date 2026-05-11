@@ -70,8 +70,21 @@ python inference.py --config-name streamfm_se_predgen +inpath=EARS-WHAM_v2_16k/t
 * You can parallelize the inference over your available GPUs using e.g. `+gpus=2`.
 * For solver variants and settings, see the file `sgmse/util/solvers.py`.
 
+### Mel Vocoding inference
+Typically in this repo we "simulate" the process of Mel vocoding by taking a clean input audio, mapping it to a Mel spectrogram, and then using our model to map this back to the time domain.
+To actually run inference from Mel spectra directly, you should do something like:
+```
+model = ... # some Mel vocoder sgmse.model.FlowModel instance
+from sgmse.util.diffphase import PhaselessMelAndBack; assert isinstance(model.post_Y_fn, PhaselessMelAndBack)  # sanity check for model instance
+input_mel = ... # your Mel spectrogram, **must** match the configuration that `model` was trained with
+# Project input_mel back to STFT space, using Mel pseudoinverse and zero-phase real-in-complex embedding, see the paper
+Y = torch.matmul(model.post_Y_fn.pseudoinverse.T, input_mel).abs()**model.post_Y_fn.alpha + 0j
+# Run model directly on Y
+Xhat = model.enhance_from_features(Y, solver='euler', N=5)
+```
+which can be adapted to streaming inference (see below) by applying the pseudoinverse on each incoming frame.
 
-## Streaming inference
+### Streaming inference
 
 * To perform streaming (frame-by-frame) inference, refer to the `init_state()` and `forward_step(x, state)` functions of the `sgmse.backbones.streaming_unet.CausalNCSNpp` class. For improved speed, consult the supplementary material of [the Stream.FM paper](https://arxiv.org/abs/2512.19442), particularly the section "MODEL IMPLEMENTATION AND OPTIMIZATION". We especially recommend the use of CUDA graphs as described there.
 * Note that the default `forward_step()` function of our backbone is already decorated with the recommended `torch.compile` wrapper:
