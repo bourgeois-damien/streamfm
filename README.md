@@ -73,7 +73,7 @@ python inference.py --config-name streamfm_se_predgen +inpath=EARS-WHAM_v2_16k/t
 ### Mel Vocoding inference
 Typically in this repo we "simulate" the process of Mel vocoding by taking a clean input audio, mapping it to a Mel spectrogram, and then using our model to map this back to the time domain.
 To actually run inference from Mel spectra directly, you should do something like:
-```
+```python
 model = ... # some Mel vocoder sgmse.model.FlowModel instance
 from sgmse.util.diffphase import PhaselessMelAndBack; assert isinstance(model.post_Y_fn, PhaselessMelAndBack)  # sanity check for model instance
 input_mel = ... # your Mel spectrogram, **must** match the configuration that `model` was trained with
