@@ -1,0 +1,36 @@
+defaults:
+  - _paths
+  - streamfm_melflow
+  - _self_
+
+load_model_from_ckpt: "runs/streamflow/spgpu2.job_7655/checkpoints/last.ckpt"
+
+transform_model_backbone_fn:
+  _target_: sgmse.backbones.streaming_unet.compress_decoupled_
+  _partial_: True
+  K: 4
+
+model:
+  # low constant LR, no scheduling
+  lr: 5e-5
+  scheduler_config: !!null
+  data_module:
+    _target_: sgmse.data_module.AudioDataModule
+    batch_size: 6  # per device
+    format: ears_wham
+    train_path: ${ewv2_train_csv}
+    valid_path: ${ewv2_valid_csv}
+    test_path: ${ewv2_test_csv}
+    return_x_as_y: True  # we will get Y by postprocessing X=Y in the model itself instead for our PR task
+    sampling_rate: ${sampling_rate}
+    target_duration: 32512  # (128-1) * 16ms*16kHz) for center=True and 128 target frames
+    spatial_channels: 1
+    num_workers: 8
+    pin_memory: True
+    # crop paired files to shorter one. this happens sometimes in our BWR task (downsample->upsample is ambiguous)
+    crop_paired_to_shorter: True
+
+trainer_constructor:
+  devices: 2
+  max_steps: 25000
+  gradient_clip_val: !!null  # no grad clipping

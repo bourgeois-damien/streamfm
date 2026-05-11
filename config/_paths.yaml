@@ -1,0 +1,15 @@
+ewv2_train_csv: /data3/databases/EARS-WHAM_v2_16k/train.csv
+ewv2_valid_csv: /data3/databases/EARS-WHAM_v2_16k/valid.csv
+ewv2_test_csv: /data3/databases/EARS-WHAM_v2_16k/test.csv
+
+erv2_train_csv: /data3/databases/EARS-Reverb_v2_16k/train.csv
+erv2_valid_csv: /data3/databases/EARS-Reverb_v2_16k/valid.csv
+erv2_test_csv: /data3/databases/EARS-Reverb_v2_16k/test.csv
+
+ewv2_bwr_train_path: /data3/databases/EARS_v2_16k_BWR/train/
+ewv2_bwr_valid_path: /data3/databases/EARS_v2_16k_BWR/valid/
+ewv2_bwr_test_path: /data3/databases/EARS_v2_16k_BWR/test/
+
+ewv2_lyra_train_path: /data3/databases/EARS_v2_16k_Lyra/dataset_highpass75/3200bit/train/
+ewv2_lyra_valid_path: /data3/databases/EARS_v2_16k_Lyra/dataset_highpass75/3200bit/valid/
+ewv2_lyra_test_path: /data3/databases/EARS_v2_16k_Lyra/dataset_highpass75/3200bit/test/

@@ -1,0 +1,60 @@
+defaults:
+  - _paths
+  - streamfm_derev
+  - _self_
+
+# checkpoint of wrapped flow model
+ckpt: checkpoints/streamfm_derev.ckpt
+
+solver_model:
+  _target_: sgmse.model.CustomRKSolverEnhancementModel
+  base_solver: rk5_ralston3_ralston2
+  b_min: 0.05  # every gradient should be used with to at least 5% in the weighted sum
+  c_max: 0.85  # no evaluated time point should exceed 0.85
+  a_penalty: [-2.0, 2.0, 0.1]  # penalize `a` values beyond [-2, 2] with weight 0.1
+  lr: 1e-3
+  losses:
+    - _target_: sgmse.losses.signal.MultiScaleSTFTLoss
+      window_lengths: [320, 512, 640]
+      n_hops: 4
+      mag_weight: 0.0
+      log_weight: 1.0
+      sampling_rate: ${sampling_rate}
+      loss_fn:
+        _target_: torch.nn.MSELoss
+        reduction: mean
+      weight: 0.001
+    - _target_: sgmse.losses.speechbert.SpeechBERTLoss
+      sampling_rate: ${sampling_rate}
+      weight: 1.0
+  optimizer_constructor:
+    # this will receive parameters and lr when actually instantiated by the model
+    _partial_: True
+    _target_: torch.optim.Adam
+    fused: True  # should be faster
+  data_module:
+    _target_: sgmse.data_module.AudioDataModule
+    batch_size: 5  # per device
+    format: ears_reverb
+    train_path: ${erv2_train_csv}
+    valid_path: ${erv2_valid_csv}
+    test_path: ${erv2_test_csv}
+    sampling_rate: ${sampling_rate}
+    target_duration: 32512  # (128-1) * 16ms*16kHz) for center=True and 128 target frames
+    spatial_channels: 1
+    num_workers: 4
+    pin_memory: True
+    # crop paired files to shorter one. this happens sometimes in our BWR task (downsample->upsample is ambiguous)
+    crop_paired_to_shorter: True
+
+num_training_steps: 25000
+
+trainer_constructor:
+  max_steps: ${num_training_steps}
+  callbacks:
+    - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+      save_last: True
+      filename: "{step:02d}"
+      every_n_train_steps: ${num_training_steps}
+    - _target_: pytorch_lightning.callbacks.TQDMProgressBar
+      refresh_rate: 50

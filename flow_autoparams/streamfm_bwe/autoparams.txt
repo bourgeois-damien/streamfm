@@ -1,0 +1,7 @@
+Config name: 250627_streamflow_bwr_ears2_freqdil_autoparams_perbandx3
+Args: Namespace(config_name='250627_streamflow_bwr_ears2_freqdil_autoparams_perbandx3', train_path=None, n_samples=2500, seed=1, qx=0.997, qrmse=0.997, per_band=False, outfile_suffix=None, overwrite=False, device=0)
+=== Results ===
+   	q0.997( |x|  ) = 0.950, max( |x|  ) = 2.814
+   	q0.997( RMSE ) = 0.183, max( RMSE ) = 0.265
+-->	beta=1.05, sigma_y=0.06
+-->	sigma_y_perband written to flow_autoparams/250627_streamflow_bwr_ears2_freqdil_autoparams_perbandx3/autoparamssigy_perband.npy

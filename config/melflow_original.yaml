@@ -1,0 +1,122 @@
+defaults:
+  - _paths
+  - _self_
+
+resume_from_ckpt: null
+sampling_rate: 16000
+num_training_steps: 140000
+float32_matmul_precision: high
+run_id: null  # may be overridden by wandb when using wandblogger
+seed: 137  # will be used for torch and numpy
+
+logger:
+  _partial_: True
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: streamflow
+  save_dir: "./runs/"
+
+model:
+  _target_: sgmse.model.FlowModel
+  sigma_x: 0.001
+  sigma_y:  0.25
+  lr: 5e-4
+  sampling_rate: ${sampling_rate}
+  post_Y_fn:
+    # here we try to match the 16kHz HiFi-GAN settings for Speechbrain, see
+    # https://github.com/speechbrain/speechbrain/blob/7d214a38861b7e8ba6a504f126c879275ac9515b/recipes/LibriTTS/vocoder/hifigan/hparams/train.yaml#L29-L44
+    # we do use a different n_fft but this should not matter for being able to take the same input Mel spectra, since we have the same hop length and n_mels
+    _target_: sgmse.util.diffphase.PhaselessMelAndBack
+    n_mels: 80
+    sample_rate: ${sampling_rate}
+    f_min: 0.0
+    f_max: 8000 # sampling_rate/2
+    n_stft: 256  # (n_fft//2+1) -1 because we cut highest freq so we get 256 not 257
+    norm: slaney
+    mel_scale: slaney
+    alpha: 0.5  # match compression in feature extractor. used to decompress -> melscale -> compress back
+  backbone:
+    _target_: sgmse.backbones.streaming_unet.CausalNCSNpp
+    ch_mult: [1, 2, 2, 2]
+    conditional: True
+    input_freqs: 256
+    input_channels: 4
+    output_channels: 2
+    norm_type: subband_grouped_batchnorm
+    norm_kwargs: {}
+    init_scale: 1e-5
+    no_freq_groups_below: 16
+  feature_extractor:
+    _target_: sgmse.feature_extractors.CompressedAmplitudeComplexSTFT
+    n_fft: 512            # 32ms window
+    hop_length: 256       # 16ms hop
+    cut_highest_freqs: 1  # cut Nyquist on forward, pad back in on invert
+    # use sqrt-Hann window for easier OLA procedure in streaming mode
+    window: hann
+    sqrt_window: False  # different from other runs, but we try to match HiFiGAN here so just use plain Hann
+    # compression args
+    alpha: 0.5
+    beta: 1.0
+    normalized_stft: True
+    compression_is_learnable: False
+    sampling_rate: ${sampling_rate}
+  data_module:
+    _target_: sgmse.data_module.AudioDataModule
+    batch_size: 12  # per device
+    format: ears_wham
+    train_path: ${ewv2_train_csv}
+    valid_path: ${ewv2_valid_csv}
+    test_path: ${ewv2_test_csv}
+    return_x_as_y: True  # we will get Y by postprocessing X=Y in the model itself instead for our PR task
+    sampling_rate: ${sampling_rate}
+    target_duration: 32512  # (128-1) * 16ms*16kHz) for center=True and 128 target frames
+    spatial_channels: 1
+    num_workers: 8
+    pin_memory: True
+    # crop paired files to shorter one. this happens sometimes in our BWR task (downsample->upsample is ambiguous)
+    crop_paired_to_shorter: True
+  optimizer_constructor:
+    # this will receive parameters and lr when actually instantiated by the model
+    _partial_: True
+    _target_: sgmse.soap_optimizer.SOAP
+  scheduler_config:
+    scheduler_constructor:
+      _partial_: True
+      _target_: sgmse.util.schedulers.get_cosine_schedule_with_warmup
+      num_warmup_steps: 1000  # warmup for 1000 steps
+      num_training_steps: ${num_training_steps}
+      num_cycles: 0.5  # cosine decay
+    scheduler_config_dict:
+      # scheduler_config for lightning
+      name: warmup_cosine
+      interval: step  # step-wise scheduler
+      frequency: 1  # every step
+      strict: True  # fail if not found in optimizer
+
+trainer_constructor:
+  _partial_: True
+  _target_: pytorch_lightning.Trainer
+  devices: 4
+  accelerator: gpu
+  precision: 32
+  max_steps: ${num_training_steps}
+  log_every_n_steps: 50
+  num_sanity_val_steps: 1
+  check_val_every_n_epoch: 1
+  val_check_interval: 1.0
+  strategy:
+    _target_: pytorch_lightning.strategies.DDPStrategy
+    find_unused_parameters: False
+  callbacks:
+    - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+      save_last: True
+      filename: "{epoch:02d}"
+    - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+      monitor: valid_loss
+      mode: min
+      save_top_k: 1
+      save_last: True
+      filename: "{epoch:02d}-{valid_loss:.4f}"
+    - _target_: pytorch_lightning.callbacks.TQDMProgressBar
+      refresh_rate: 50
+    - _target_: pytorch_lightning.callbacks.LearningRateMonitor
+      logging_interval: step

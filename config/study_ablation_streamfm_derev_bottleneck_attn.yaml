@@ -1,0 +1,8 @@
+defaults:
+  - _paths
+  - streamfm_derev
+  - _self_
+
+model:
+  backbone:
+    attn_bottleneck: True

@@ -1,0 +1,114 @@
+defaults:
+  - _paths
+  - _self_
+
+resume_from_ckpt: null
+sampling_rate: 16000
+num_training_steps: 150000
+float32_matmul_precision: high
+run_id: null  # may be overridden by wandb when using wandblogger
+seed: 137  # will be used for torch and numpy
+
+logger:
+  _partial_: True
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: streamflow
+  save_dir: "./runs/"
+
+model:
+  _target_: sgmse.model.DiscriminativeModel
+  discriminative_mode: direct
+  lr: 3e-3  # default from SOAP, not sure about this one
+  normalize_mode: none
+  losses:
+    - _target_: sgmse.losses.signal.TimeDomainLoss
+      loss_fn:
+        _target_: torch.nn.L1Loss
+        reduction: mean
+      weight: 0.5
+    - _target_: sgmse.losses.signal.MultiScaleSTFTLoss
+      loss_fn:
+        _target_: torch.nn.L1Loss
+        reduction: mean
+      window_lengths: [256, 512, 768, 1024]
+      n_hops: 2
+      mag_weight: 1.0
+      log_weight: 0.0
+      pow: 1.0
+      weight: 0.5
+  sampling_rate: ${sampling_rate}
+  backbone:
+    _target_: sgmse.backbones.ncsnpp_orig.NCSNpp
+    ch_mult: [1, 2, 2, 2]
+    num_res_blocks: 2
+    discriminative: True
+    conditional: False
+    scale_by_sigma: False
+    image_size: 256
+    input_channels: 2
+    spatial_channels: 1
+    centered: True
+    pad_time_to: 8  # downsampling factor 2^(len(ch_mult) - 1)
+  feature_extractor:
+    _target_: sgmse.feature_extractors.CompressedAmplitudeComplexSTFT
+    n_fft: 512            # 32ms window
+    hop_length: 256       # 16ms hop
+    cut_highest_freqs: 1  # cut Nyquist on forward, pad back in on invert
+    # use sqrt-Hann window for easier OLA procedure in streaming mode
+    window: hann
+    sqrt_window: True
+    # compression args
+    alpha: 0.5
+    beta: 1.0
+    normalized_stft: True
+    compression_is_learnable: False
+    sampling_rate: ${sampling_rate}
+  data_module:
+    _target_: sgmse.data_module.AudioDataModule
+    batch_size: 12  # per device
+    format: ears_wham
+    peak_normalize_clean: True
+    random_neg_gain_noisy: -12  # dB
+    train_path: ${ewv2_train_csv}
+    valid_path: ${ewv2_valid_csv}
+    test_path: ${ewv2_test_csv}
+    sampling_rate: ${sampling_rate}
+    target_duration: 32512  # (128-1) * 16ms*16kHz) for center=True and 128 target frames
+    spatial_channels: 1
+    num_workers: 8
+    pin_memory: True
+  optimizer_constructor:
+    # this will receive parameters and lr when actually instantiated by the model
+    _partial_: True
+    _target_: sgmse.soap_optimizer.SOAP
+
+trainer_constructor:
+  _partial_: True
+  _target_: pytorch_lightning.Trainer
+  devices: 2
+  accelerator: gpu
+  precision: 32
+  max_steps: ${num_training_steps}
+  log_every_n_steps: 50
+  num_sanity_val_steps: 1
+  check_val_every_n_epoch: 1
+  val_check_interval: 1.0
+  strategy:
+    _target_: pytorch_lightning.strategies.DDPStrategy
+    find_unused_parameters: False
+  gradient_clip_val: 0.003
+  gradient_clip_algorithm: norm
+  callbacks:
+    - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+      save_last: True
+      filename: "{epoch:02d}"
+    - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+      monitor: valid_loss
+      mode: min
+      save_top_k: 1
+      save_last: True
+      filename: "{epoch:02d}-{valid_loss:.4f}"
+    - _target_: pytorch_lightning.callbacks.TQDMProgressBar
+      refresh_rate: 50
+    - _target_: pytorch_lightning.callbacks.LearningRateMonitor
+      logging_interval: step

@@ -1,0 +1,10 @@
+defaults:
+  - _paths
+  - streamfm_derev
+  - _self_
+
+model:
+  backbone:
+    up_path_channel_concatenation: True
+  data_module:
+    batch_size: 10  # instead of 12, to fit within 48GB memory
