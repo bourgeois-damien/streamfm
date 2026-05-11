@@ -77,8 +77,8 @@ To actually run inference from Mel spectra directly, you should do something lik
 model = ... # some Mel vocoder sgmse.model.FlowModel instance
 from sgmse.util.diffphase import PhaselessMelAndBack; assert isinstance(model.post_Y_fn, PhaselessMelAndBack)  # sanity check for model instance
 input_mel = ... # your Mel spectrogram, **must** match the configuration that `model` was trained with
-# Project input_mel back to STFT space, using Mel pseudoinverse and zero-phase real-in-complex embedding, see the paper
-Y = torch.matmul(model.post_Y_fn.pseudoinverse.T, input_mel).abs()**model.post_Y_fn.alpha + 0j
+# Project input_mel back to STFT space naively, using Mel pseudoinverse and zero-phase real-in-complex embedding, see the paper
+Y = model.post_Y_fn.back_from_mel(input_mel)
 # Run model directly on Y
 Xhat = model.enhance_from_features(Y, solver='euler', N=5)
 ```
