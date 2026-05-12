@@ -45,14 +45,14 @@ gdown https://drive.google.com/drive/folders/1u2QKjGAdxblQVV8-qmifSM9AwhT86LER?u
 
 ## Training
 
-* Training is done by executing `train.py` which uses [Hydra](https://hydra.cc/) configs, see the `config/` folder.
-* First, plase check and modify `config/_paths.yaml` to refer to your local dataset paths.
+* Training is done by executing [`train.py`](train.py) which uses [Hydra](https://hydra.cc/) configs, see the [`config/`](config/) folder.
+* Before proceeding, plase check and modify [`config/_paths.yaml`](config/_paths.yaml) to refer to your local dataset paths.
 * A minimal running example with default settings, e.g., for bandwidth extension, can then be run with:
   ```bash
   python train.py --config-name streamfm_bwe
   ```
-  which refers to the `config/streamfm_bwe.yaml` config file.
-* Note that for the config files starting with `LRK`, for fitting a learned Runge-Kutta scheme as described in [1], you must use the `fit_rk_scheme.py` script instead, e.g.,
+  which refers to the [`config/streamfm_bwe.yaml`](config/streamfm_bwe.yaml) config file.
+* Note that for the config files starting with `LRK`, for fitting a learned Runge-Kutta scheme as described in [1], you must use the [fit_rk_scheme.py](fit_rk_scheme.py) script instead, e.g.,
   ```bash
   python fit_rk_scheme.py --config-name LRK5_streamfm_bwe
   ```
@@ -60,15 +60,19 @@ gdown https://drive.google.com/drive/folders/1u2QKjGAdxblQVV8-qmifSM9AwhT86LER?u
 
 ## Inference
 
-To run (offline) inference on your data, see `inference.py`. This needs at least the extra Hydra config keys `inpath`, `outpath`, `solver`, and `ckpt`.
-The script expects `inpath` to be a folder containing .wav files, and will reproduce the same input filenames for the enhanced files in the `outpath` folder.
+To run (offline) inference on your data, see [inference.py](inference.py). This requires a `--config-name` matching the model you want to run inference for.
+It furthermore needs at least the extra Hydra config keys `+inpath=...`, `+outpath=...`, `+solver=...`, and `+ckpt=...`, see the [Hydra overrides syntax](https://hydra.cc/docs/advanced/override_grammar/basic/) for more info.
 
 An example call for speech enhancement (make sure to modify the `inpath`):
 ```bash
 python inference.py --config-name streamfm_se_predgen +inpath=EARS-WHAM_v2_16k/test/noisy/ +outpath=enhancement_results/test-se/ +ckpt=checkpoints/streamfm_se_predgen.ckpt +solver=5xeuler +gpus=2
 ```
-* You can parallelize the inference over your available GPUs using e.g. `+gpus=2`.
-* For solver variants and settings, see the file `sgmse/util/solvers.py`.
+
+* The script expects `+inpath=` to be a folder containing .wav files,
+* and will reproduce the same input filenames for the enhanced files in the `+outpath=` folder.
+* For `+solver=...` options, see the available ODE solvers in [sgmse/util/solvers.py](sgmse/util/solvers.py). We recommend starting with e.g. `+solver=5xeuler`.
+* For `+ckpt=...`, pass a path to checkpoint file, matching the model architecture of the provided `--config-name`.
+* You can parallelize the inference over your available GPUs using e.g. `+gpus=2`, but this is optional.
 
 ### Mel Vocoding inference
 Typically in this repo we "simulate" the process of Mel vocoding by taking a clean input audio, mapping it to a Mel spectrogram, and then using our model to map this back to the time domain.
@@ -86,7 +90,7 @@ which can be adapted to streaming inference (see below) by applying the pseudoin
 
 ### Streaming inference
 
-* To perform streaming (frame-by-frame) inference, refer to the `init_state()` and `forward_step(x, state)` functions of the `sgmse.backbones.streaming_unet.CausalNCSNpp` class. For improved speed, consult the supplementary material of [the Stream.FM paper](https://arxiv.org/abs/2512.19442), particularly the section "MODEL IMPLEMENTATION AND OPTIMIZATION". We especially recommend the use of CUDA graphs as described there.
+* To perform streaming (frame-by-frame) inference, refer to the `init_state()` and `forward_step(x, state)` functions of the [sgmse.backbones.streaming_unet.CausalNCSNpp](https://github.com/search?q=repo%3Asp-uhh/streamfm%20CausalNCSNpp&type=code) class. For improved speed, consult the supplementary material of [the Stream.FM paper](https://arxiv.org/abs/2512.19442), particularly the section "MODEL IMPLEMENTATION AND OPTIMIZATION". We especially recommend the use of CUDA graphs as described there.
 * Note that the default `forward_step()` function of our backbone is already decorated with the recommended `torch.compile` wrapper:
   ```python
   @torch.compile(fullgraph=True, options={
