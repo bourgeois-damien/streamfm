@@ -106,12 +106,12 @@ which can be adapted to streaming inference (see below) by applying the pseudoin
 We kindly ask you to cite our papers in your publication when using any of our research or code:
 
 ```bib
-@article{welker2025streamfm,
-  title={Real-Time Streamable Generative Speech Restoration with Flow Matching},
-  author={Simon Welker and Bunlong Lay and Maris Hillemann and Tal Peer and Timo Gerkmann},
-  year={2025},
-  journal={arXiv preprint arXiv:2512.19442},
-  doi={10.48550/arXiv.2512.19442}
+@article{welker2026streamfm,
+    title={Real-Time Streamable Generative Speech Restoration with Flow Matching},
+    author={Welker, Simon and Lay, Bunlong and Hillemann, Maris and Peer, Tal and Gerkmann, Timo},
+    year={2026},
+    journal={IEEE Transactions on Audio, Speech and Language Processing}, 
+    doi={10.1109/TASLPRO.2026.3696215}
 }
 
 @inproceedings{welker2026melflow,
