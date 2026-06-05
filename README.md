@@ -2,7 +2,7 @@
 
 This repository contains the official PyTorch implementation for our works
 
-- [1] Stream.FM aka [*Real-Time Streamable Generative Speech Restoration with Flow Matching*](https://arxiv.org/abs/2512.19442), preprint, arXiv, 2026.
+- [1] Stream.FM aka [*Real-Time Streamable Generative Speech Restoration with Flow Matching*](https://arxiv.org/abs/2512.19442), IEEE Transactions on Audio, Speech and Language Processing, 2026.
 - [2] MelFlow aka [*Real-Time Streaming Mel Vocoding with Generative Flow Matching*](https://arxiv.org/abs/2509.15085), IEEE ICASSP 2026.
 
 📖 For the full citations, see [the end of this README](https://github.com/sp-uhh/streamfm#citations--references).
