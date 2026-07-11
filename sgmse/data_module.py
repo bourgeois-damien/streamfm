@@ -79,7 +79,22 @@ class AudioDataset(Dataset):
             filesuffix = {'ears_reverb': '', 'ears_wham': 'dB', 'ears_other': ''}[format]
             noisydir = {'ears_reverb': 'reverberant', 'ears_wham': 'noisy', 'ears_other': 'noisy'}[format]
 
-            csv = pd.read_csv(path, dtype={'id': str, **({filekey: str} if filekey else {})})
+            csv = pd.read_csv(path, dtype={'id': str, 'speaker': str, **({filekey: str} if filekey else {})})
+            if format == 'ears_wham' and whichset == 'test' and not str(csv.iloc[0]['speaker']).startswith('p'):
+                # The official ears_benchmark test.csv header has 9 columns, but rows contain
+                # the same 12 fields as save_files() writes for train/valid. Re-read with the
+                # actual schema so path reconstruction keeps speaker/id/snr aligned.
+                csv = pd.read_csv(
+                    path,
+                    skiprows=1,
+                    header=None,
+                    names=[
+                        'id', 'speaker', 'speech_file', 'speech_start', 'speech_end',
+                        'noise_file', 'noise_start', 'noise_end',
+                        'speech_dB', 'noise_dB', 'mixture_dB', 'snr_dB',
+                    ],
+                    dtype={'id': str, 'speaker': str, **({filekey: str} if filekey else {})},
+                )
             basedir = os.path.dirname(path)
             self.clean_files = [
                 join(

@@ -1,0 +1,49 @@
+# Sweep batch: local CPU (ex. Mac), steps=1
+# Mêmes axes que Modal CPU, sans cuda_graph.
+# Grille: execution × dtype × memory_format × preallocate = 24 runs.
+#
+# Force hardware=cpu (pas mps) pour comparer au Modal CPU.
+#
+# Lancer:
+#   python experiments/benchmarks/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweep_local_cpu_steps1.yaml \
+#     --wandb-group local-cpu-steps1-batch
+#
+program: experiments/benchmarks/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: local
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    values:
+      - eager
+      - compiled
+  steps:
+    value: 1
+  dtype:
+    values:
+      - fp32
+      - fp16
+      - bf16
+  memory_format:
+    values:
+      - contiguous
+      - channels_last
+  preallocate_model_buffers:
+    values:
+      - false
+      - true
+  iterations:
+    value: 100
+  warmup:
+    value: 20
+  hardware:
+    value: cpu

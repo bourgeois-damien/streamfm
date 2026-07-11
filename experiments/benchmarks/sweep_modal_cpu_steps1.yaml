@@ -1,0 +1,49 @@
+# Sweep batch: Modal CPU, steps=1
+# Mêmes axes que L4, sans cuda_graph (non supporté sur CPU).
+# Grille: execution × dtype × memory_format × preallocate
+# = 2 × 3 × 2 × 2 = 24 runs.
+#
+# Lancer (ex. 8 containers CPU en parallèle) :
+#   python experiments/benchmarks/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweep_modal_cpu_steps1.yaml \
+#     --wandb-group modal-cpu-steps1-batch \
+#     --workers 8
+#
+program: experiments/benchmarks/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    values:
+      - eager
+      - compiled
+  steps:
+    value: 1
+  dtype:
+    values:
+      - fp32
+      - fp16
+      - bf16
+  memory_format:
+    values:
+      - contiguous
+      - channels_last
+  preallocate_model_buffers:
+    values:
+      - false
+      - true
+  iterations:
+    value: 100
+  warmup:
+    value: 20
+  hardware:
+    value: CPU

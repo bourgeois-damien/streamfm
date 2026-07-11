@@ -1,0 +1,53 @@
+# Sweep batch: Modal L4, steps=1
+# Grille: execution × dtype × memory_format × preallocate
+# = 3 × 3 × 2 × 2 = 36, moins 6 combos cuda_graph+preallocate → 30 runs.
+#
+# Lancer:
+#   python experiments/benchmarks/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweep_l4_steps1.yaml \
+#     --wandb-group l4-steps1-batch
+#
+program: experiments/benchmarks/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    values:
+      - eager
+      - compiled
+      - cuda_graph
+  steps:
+    value: 1
+  dtype:
+    values:
+      - fp32
+      - fp16
+      - bf16
+  memory_format:
+    values:
+      - contiguous
+      - channels_last
+  preallocate_model_buffers:
+    values:
+      - false
+      - true
+  iterations:
+    value: 100
+  warmup:
+    value: 20
+  hardware:
+    value: L4
+
+# preallocate n'a aucun effet sur le chemin cuda_graph → combos redondantes
+exclude:
+  - execution: cuda_graph
+    preallocate_model_buffers: true

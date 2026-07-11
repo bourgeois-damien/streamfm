@@ -566,21 +566,23 @@ def compress_decoupled_(model, K: int | Callable[[str, nn.Module], int], module_
     """
     if hasattr(model, '_compressed_decoupled') and model._compressed_decoupled:
         print("Model is already compressed, skipping.")
-        return
+        return model
 
     for name, module in model.named_modules():
         if isinstance(module, CausalConv2d):
+            k = K(name, module) if callable(K) else K
+            if not isinstance(k, int) or k < 1:
+                raise ValueError(f"K must be a positive integer for {name}, got {k!r}")
             if np.prod(module.kernel_size) == 1:
                 print(f"NOT compressing {name} (1x1 conv)")
                 continue
-            if K > np.prod(module.kernel_size) or K > module.in_channels or K > module.out_channels:
-                print(f"NOT compressing {name} ({K=} too large)")
+            if k > np.prod(module.kernel_size) or k > module.in_channels or k > module.out_channels:
+                print(f"NOT compressing {name} ({k=} too large)")
                 continue
             if not module_filter(name, module):
                 print(f"NOT compressing {name} (filtered by module_filter)")
                 continue
 
-            k = K(name, module) if callable(K) else K
             print(f"Compressing {name} with K={k}")
             compressed = CausalDecoupledConv2d.from_causal_conv2d(module, K=k)
             # Replace the module in the parent
@@ -675,6 +677,8 @@ class CausalResnetBlockBigGANpp(nn.Module, CausalStreamingModule):
             self.CConv_0.init_state(input_freqs=freqs),
             self.CConv_1.init_state(input_freqs=freqs),
             self.CConv_2.init_state(input_freqs=freqs) if isinstance(self.CConv_2, CausalStreamingModule) else None,
+            # Reserved for optional block-level state without changing the tuple shape again.
+            None,
         )
 
     def forward_step(self, x: torch.Tensor, temb=None, *, state: Tuple) -> Tuple[torch.Tensor, Tuple]:
@@ -808,30 +812,30 @@ class DownOrUpSample(nn.Module, CausalStreamingModule):
 
 
 def upfirdn1d_freq(x, kernel, up=1, down=1):
-    # TODO could be optimized?
+    # Keep this as plain tensor ops; this path is hit in streaming benchmarks.
     assert x.ndim == 4, "Input must be 4D (batch, channel, frequency, time)"
     (B, C, Fr, T) = x.shape
     assert kernel.ndim == 1, "Kernel must be 1D"
 
     out = x
     if up > 1:
-        out = rearrange(out, 'b c f t -> b c f 1 t')
+        out = out.unsqueeze(3)
         # intersperse 0s along frequency
         out = F.pad(out, (0, 0, 0, up - 1), mode='constant', value=0.0)
-        out = rearrange(out, 'b c f pad t -> b c (f pad) t')
+        out = out.reshape(B, C, Fr * up, T)
 
     # Apply 'same' padding along freq
-    if len(kernel) > 1:
-        out = rearrange(out, 'b c fpad t -> (b c t) fpad')
+    if kernel.shape[0] > 1:
+        out = out.permute(0, 1, 3, 2).reshape(B * C * T, out.shape[2])
         kernel_n = kernel.shape[0]
         pad_left = (kernel_n - 1) // 2
         pad_right = kernel_n - 1 - pad_left
         out = F.pad(out, (pad_left, pad_right), mode='constant', value=0.0)
-        out = rearrange(out, 'bct fpad -> bct 1 fpad')
+        out = out.unsqueeze(1)
         # Run the FIR kernel
         w = torch.flip(kernel, dims=(0,)).view(1, 1, kernel_n)
         out = F.conv1d(out, w)
-        out = rearrange(out, '(b c t) 1 fpad -> b c fpad t', b=B, c=C, t=T)
+        out = out.squeeze(1).reshape(B, C, T, out.shape[-1]).permute(0, 1, 3, 2).contiguous()
     # Decimate along frequency
     if down > 1:
         out = out[:, :, ::down, :]
@@ -861,6 +865,7 @@ class CausalConv2d(nn.Conv2d, CausalStreamingModule):
         self.kernel_size = kernel_size
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.depthwise_separable = False
 
         self.time_padding = time_padding
         self.pad_freq = pad_freq

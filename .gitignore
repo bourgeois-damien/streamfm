@@ -13,6 +13,12 @@ auto-save-list
 tramp
 .\#*
 
+/requirements-mac.txt
+/.venv_old
+
+/papers/
+/inputs/
+
 # Org-mode
 .org-id-locations
 *_archive
@@ -333,3 +339,4 @@ $RECYCLE.BIN/
 /runs/wandb
 /outputs
 /enhancement_results
+/tests/
