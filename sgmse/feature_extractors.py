@@ -5,6 +5,23 @@ import torch
 import einops
 
 
+def _to_full_precision(t: torch.Tensor) -> torch.Tensor:
+    """Upcast a possibly reduced-precision tensor to full precision.
+
+    torch.stft (cuFFT), torch.istft, torch.polar and complex construction have no
+    fp16/bf16 CUDA kernels, so the STFT front-end must run in full precision even
+    when the surrounding model executes under autocast. These ops are not
+    autocast-eligible, so upcasting their inputs is enough to keep them in fp32
+    (autocast never downcasts them back); the real-valued backbone still runs in
+    half. Complex32 -> complex64, fp16/bf16 -> fp32; everything else is untouched.
+    """
+    if t.is_complex():
+        return t.to(torch.complex64) if t.dtype == torch.complex32 else t
+    if t.dtype in (torch.float16, torch.bfloat16):
+        return t.to(torch.float32)
+    return t
+
+
 class InvertibleFeatureExtractor(torch.nn.Module, abc.ABC):
     """
     Invertible feature extractor, should fulfill `extractor.invert(extractor(x)) == x`.
@@ -121,6 +138,8 @@ class CompressedAmplitudeComplexSTFT(InvertibleFeatureExtractor):
                 alpha_override: Optional[float] = None, beta_override: Optional[float] = None):
         """Assumes x is an audio tensor of shape [B, C, T]"""
         assert x.ndim == 3
+        # Keep the STFT/compression boundary in full precision under autocast.
+        x = _to_full_precision(x)
         alpha = self.alpha if alpha_override is None else alpha_override
         beta = self.beta if beta_override is None else beta_override
 
@@ -145,6 +164,9 @@ class CompressedAmplitudeComplexSTFT(InvertibleFeatureExtractor):
                comp_eps: float = 1e-12):
         """Assumes X is a (complex) spectrogram tensor of shape [B, C, F, T]"""
         assert X.ndim == 4
+        # The model output can arrive in reduced precision under autocast; the
+        # iSTFT/polar synthesis below has no fp16/bf16 kernels, so upcast here.
+        X = _to_full_precision(X)
         alpha = self.alpha if alpha_override is None else alpha_override
         beta = self.beta if beta_override is None else beta_override
 
