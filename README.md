@@ -1,124 +1,77 @@
-# Stream.FM & MelFlow: Real-Time Streamable Generative Speech Restoration with Flow Matching
+# Stream.FM fork
 
-This repository contains the official PyTorch implementation for our works
+Fork of https://github.com/sp-uhh/streamfm for my MSc project.
 
-- [1] Stream.FM aka [*Real-Time Streamable Generative Speech Restoration with Flow Matching*](https://arxiv.org/abs/2512.19442), IEEE Transactions on Audio, Speech and Language Processing, 2026.
-- [2] MelFlow aka [*Real-Time Streaming Mel Vocoding with Generative Flow Matching*](https://arxiv.org/abs/2509.15085), IEEE ICASSP 2026.
+This project looks at the practical inference efficiency of Stream.FM under streaming constraints. The main goal is to better understand and improve the quality / latency trade-off for frame-by-frame inference.
 
-📖 For the full citations, see [the end of this README](https://github.com/sp-uhh/streamfm#citations--references).
+## Main work
 
-🔊 On our [Stream.FM project page](https://sp-uhh.github.io/streamfm_examples/), you can find audio examples and our [demo video](https://www.youtube.com/watch?v=ezXzPia3EVs).
+- reconstruct / extend the streaming evaluation pipeline
+- measure the effect of runtime choices (FP16, torch.compile, CUDA Graphs, TensorRT, etc)
+- look at NFE and hardware effects on the quality / latency point
+- try model-side reductions, mainly pruning + fine-tuning on dereverberation
+- check quality on a few restoration tasks
 
+## Useful scripts
 
-## Note on MelFlow [2]
+- `experiments/benchmarks/streamfm_benchmark.py` : latency / throughput
+- `experiments/evaluation/streamfm_eval.py` : inference on test set
+- `experiments/evaluation/scoring/score_manifest.py` : metrics (PESQ, ESTOI, ...)
+- `experiments/streaming/run_local.py` : streaming on a wav
+- `compress_checkpoint.py` : SVD compression
 
-The Stream.FM paper [1] expands upon the MelFlow paper [2], see the description of additional contributions in [1].
-Since the underlying methodology (model, inference, ...) is the same, we provide code for both works in this single codebase.
+Tasks: `stftpr`, `se`, `bwe`, `derev`, `lyra` (+ `melflow` for eval)
 
-The training configuration described in the MelFlow paper [2] can be found in `config/melflow_original.yaml`.
-However, we recommend to instead use `config/streamfm_melflow.yaml` matching the description in [1]. The differences are that `streamfm_melflow.yaml` adds gradient clipping, and uses only 2 instead of 4 GPUs, and `streamfm_melflow.yaml` trains for 150k steps to be aligned with the other restoration task configs. The Mel vocoding checkpoint we provide was trained using `streamfm_melflow.yaml`, matching [1].
+## Modal setup
 
-
-## Installation
-
-- Create a new virtual environment with Python 3.10 or newer (we have not tested other Python versions, but they may work). Example with Conda (miniforge3):
-  ```bash
-  conda create -n streamfm python=3.10 -c conda-forge
-  ```
-- Activate your virtual environment, e.g. `conda activate streamfm`
-- Install the dependencies via
-  ```bash
-  pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
-  ```
-  where you should replace the `--extra-index-url` parameter to match your local CUDA installation, see [the PyTorch instructions](https://pytorch.org/get-started/locally/).
-
-
-## Pretrained checkpoints
-
-You can find the Stream.FM model checkpoints in our [Google Drive folder](https://drive.google.com/drive/folders/1u2QKjGAdxblQVV8-qmifSM9AwhT86LER?usp=sharing).
-To download all provided checkpoints to the `checkpoints/` folder, you can use:
 ```bash
-pip install gdown  # if not already installed in your virtual environment
-gdown https://drive.google.com/drive/folders/1u2QKjGAdxblQVV8-qmifSM9AwhT86LER?usp=sharing -O checkpoints --folder
+python -m pip install "modal>=1.0,<2"
+modal setup
+modal secret create wandb WANDB_API_KEY=YOUR_WANDB_API_KEY
 ```
 
+Datasets / cache: `experiments/datasets/modal_dataset_setup.py`
 
-## Training
+## Benchmark
 
-* Training is done by executing [`train.py`](train.py) which uses [Hydra](https://hydra.cc/) configs, see the [`config/`](config/) folder.
-* Before proceeding, plase check and modify [`config/_paths.yaml`](config/_paths.yaml) to refer to your local dataset paths.
-* A minimal running example with default settings, e.g., for bandwidth extension, can then be run with:
-  ```bash
-  python train.py --config-name streamfm_bwe
-  ```
-  which refers to the [`config/streamfm_bwe.yaml`](config/streamfm_bwe.yaml) config file.
-* Note that for the config files starting with `LRK`, for fitting a learned Runge-Kutta scheme as described in [1], you must use the [fit_rk_scheme.py](fit_rk_scheme.py) script instead, e.g.,
-  ```bash
-  python fit_rk_scheme.py --config-name LRK5_streamfm_bwe
-  ```
-
-
-## Inference
-
-To run (offline) inference on your data, see [inference.py](inference.py). This requires a `--config-name` matching the model you want to run inference for.
-It furthermore needs at least the extra Hydra config keys `+inpath=...`, `+outpath=...`, `+solver=...`, and `+ckpt=...`, see the [Hydra overrides syntax](https://hydra.cc/docs/advanced/override_grammar/basic/) for more info.
-
-An example call for speech enhancement (make sure to modify the `inpath`):
 ```bash
-python inference.py --config-name streamfm_se_predgen +inpath=EARS-WHAM_v2_16k/test/noisy/ +outpath=enhancement_results/test-se/ +ckpt=checkpoints/streamfm_se_predgen.ckpt +solver=5xeuler +gpus=2
+# local
+python experiments/benchmarks/streamfm_benchmark.py \
+  --local --hardware auto --task stftpr --pipeline audio \
+  --execution eager --steps 1 --iterations 10 --warmup 2
+
+# Modal
+python experiments/benchmarks/streamfm_benchmark.py \
+  --backend modal --hardware l4 \
+  --task derev --pipeline audio --execution cuda_graph \
+  --dtype fp16 --steps 1 --iterations 100 --warmup 10
 ```
 
-* The script expects `+inpath=` to be a folder containing .wav files,
-* and will reproduce the same input filenames for the enhanced files in the `+outpath=` folder.
-* For `+solver=...` options, see the available ODE solvers in [sgmse/util/solvers.py](sgmse/util/solvers.py). We recommend starting with e.g. `+solver=5xeuler`.
-* For `+ckpt=...`, pass a path to checkpoint file, matching the model architecture of the provided `--config-name`.
-* You can parallelize the inference over your available GPUs using e.g. `+gpus=2`, but this is optional.
+## Eval + scoring
 
-### Mel Vocoding inference
-Typically in this repo we "simulate" the process of Mel vocoding by taking a clean input audio, mapping it to a Mel spectrogram, and then using our model to map this back to the time domain.
-To actually run inference from Mel spectra directly, you should do something like:
-```python
-model = ... # some Mel vocoder sgmse.model.FlowModel instance
-from sgmse.util.diffphase import PhaselessMelAndBack; assert isinstance(model.post_Y_fn, PhaselessMelAndBack)  # sanity check for model instance
-input_mel = ... # your Mel spectrogram, **must** match the configuration that `model` was trained with
-# Project input_mel back to STFT space naively, using Mel pseudoinverse and zero-phase real-in-complex embedding, see the paper
-Y = model.post_Y_fn.back_from_mel(input_mel)
-# Run model directly on Y
-Xhat = model.enhance_from_features(Y, solver='euler', N=5)
+```bash
+python experiments/evaluation/streamfm_eval.py \
+  --backend modal --hardware L4 \
+  --task derev --ckpt checkpoints/streamfm_derev.ckpt \
+  --split test --limit 200 --selection random --selection-seed 42 \
+  --run-name derev-fp16-euler1 --score-after-run
+
+python experiments/evaluation/scoring/score_manifest.py \
+  outputs/eval_runs/derev-fp16-euler1/manifest.json \
+  --backend local --include-stats --include-per-file
 ```
-which can be adapted to streaming inference (see below) by applying the pseudoinverse on each incoming frame.
 
-### Streaming inference
+## Streaming local
 
-* To perform streaming (frame-by-frame) inference, refer to the `init_state()` and `forward_step(x, state)` functions of the [sgmse.backbones.streaming_unet.CausalNCSNpp](https://github.com/search?q=repo%3Asp-uhh/streamfm%20CausalNCSNpp&type=code) class. For improved speed, consult the supplementary material of [the Stream.FM paper](https://arxiv.org/abs/2512.19442), particularly the section "MODEL IMPLEMENTATION AND OPTIMIZATION". We especially recommend the use of CUDA graphs as described there.
-* Note that the default `forward_step()` function of our backbone is already decorated with the recommended `torch.compile` wrapper:
-  ```python
-  @torch.compile(fullgraph=True, options={
-      'max_autotune': True, 'epilogue_fusion': True, 'shape_padding': True,
-  })
-  ```
-  but you may want to modify or remove this decorator, depending on your goals and your hardware.
-* If you wish to adapt your own backbone DNN for this streaming type of inference within this repo, see the abstract class `sgmse.backbones.streaming_unet.CausalStreamingModule` that your DNN should implement.
-
-
-## Citations / References
-
-We kindly ask you to cite our papers in your publication when using any of our research or code:
-
-```bib
-@article{welker2026streamfm,
-    title={Real-Time Streamable Generative Speech Restoration with Flow Matching},
-    author={Welker, Simon and Lay, Bunlong and Hillemann, Maris and Peer, Tal and Gerkmann, Timo},
-    year={2026},
-    journal={IEEE Transactions on Audio, Speech and Language Processing}, 
-    doi={10.1109/TASLPRO.2026.3696215}
-}
-
-@inproceedings{welker2026melflow,
-  title={Real-Time Streaming Mel Vocoding with Generative Flow Matching},
-  author={Welker, Simon and Peer, Tal and Gerkmann, Timo},
-  booktitle={IEEE Int. Conf. on Acoustics, Speech and Sig. Process. (ICASSP)},
-  year={2026},
-  organization={IEEE}
-}
+```bash
+python experiments/streaming/run_local.py \
+  --input path/to/clip.wav \
+  --output outputs/streaming_local.wav
 ```
+
+## Folders
+
+- `sgmse/` : model
+- `experiments/` : benches, eval, streaming, pruning, modal, etc
+- `config/` : hydra configs
+- `results/` : outputs

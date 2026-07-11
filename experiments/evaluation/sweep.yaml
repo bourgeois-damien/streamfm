@@ -1,0 +1,58 @@
+# Evaluation simple : exactement un run.
+#
+# Vérifier :
+#   .venv/bin/python experiments/evaluation/run_eval_sweep.py --dry-run
+#
+# Lancer :
+#   .venv/bin/python experiments/evaluation/run_eval_sweep.py --group eval-simple-v1 --resume
+
+name: streamfm-eval-simple
+project: streamfm-evals
+entity: damien-brgs92-heriot-watt-university
+method: grid
+
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  split:
+    value: test
+  limit:
+    value: 20
+  selection:
+    value: random
+  selection_seed:
+    value: 42
+  seed:
+    value: 42
+  variant:
+    value: baseline
+  steps:
+    value: 1
+  dtype:
+    value: fp32
+  execution:
+    value: eager
+  memory_format:
+    value: contiguous
+  crop_mode:
+    value: full
+  score_after_run:
+    value: true
+  score_include_stats:
+    value: true
+  score_include_per_file:
+    value: false
+  score_with_distillmos:
+    value: true
+  wandb:
+    value: true
+
+presets:
+  baseline:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr.ckpt
+    config_overrides: []

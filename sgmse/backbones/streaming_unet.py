@@ -1,17 +1,22 @@
 from typing import Optional, List, Tuple, Mapping, Sequence, Callable
+import os
 import warnings
 
 import abc
 import functools
+import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-# increase torch dynamo compile limit
-import torch._dynamo
-torch._dynamo.config.cache_size_limit  = 64
+# Increase the torch.compile cache limit for inference/training.  Checkpoint
+# conversion does not compile models, and can skip this expensive import.
+if not os.environ.get("STREAMFM_SKIP_DYNAMO_CONFIG"):
+    import torch._dynamo
+
+    torch._dynamo.config.cache_size_limit = 64
 
 from .unet_utils.layerspp import GaussianFourierProjection, Combine, get_act
 from .unet_utils.layerspp import AttnBlockpp, NIN  # only for ablation studies
@@ -52,7 +57,10 @@ class StreamingIdentity(nn.Module, CausalStreamingModule):
     def init_state(self, *args, **kwargs):
         return ()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        # Accept and ignore extra positional/keyword args (e.g. the time
+        # embedding passed to residual blocks) so this can transparently stand
+        # in for a pruned CausalResnetBlock in the eager forward() path.
         return x
 
 
@@ -111,7 +119,7 @@ class CausalAttnBlockpp(nn.Module):
         if not self.skip_rescale:
             return x + h
         else:
-            return (x + h) / np.sqrt(2.)
+            return (x + h) / math.sqrt(2.0)
 
 
 
@@ -467,9 +475,9 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
             for v in obj:
                 self.zero_state(v)
 
-    @torch.compile(fullgraph=True, options={
-        'max_autotune': True, 'epilogue_fusion': True, 'shape_padding': True,
-    })
+    # Benchmark candidate kernels and enable the standard max-autotune runtime
+    # optimizations, including CUDA Graphs when the backend supports them.
+    @torch.compile(fullgraph=True, mode="max-autotune")
     def forward_step(self, x: torch.Tensor, time_cond=None, aux_condition=None, *, state: list) -> Tuple[torch.Tensor, List]:
         """
         Forward pass for a single frame.
@@ -485,7 +493,7 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
         temb = self.prepare_temb(time_cond)
         m_idx = 0
 
-        h0, _ = self.input_layer.forward_step(x, state=state[m_idx])
+        h0, state[m_idx] = self.input_layer.forward_step(x, state=state[m_idx])
         m_idx += 1
         hs_up = [h0]
         input_pyramid = x
@@ -494,13 +502,13 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
         # Down path
         for l in range(self.num_resolutions):
             for k in range(self.num_res_blocks):
-                h, _ = self.down_modules[f'lvl{l}_rnb{k}'].forward_step(
+                h, state[m_idx] = self.down_modules[f'lvl{l}_rnb{k}'].forward_step(
                     h, temb, state=state[m_idx])
                 m_idx += 1
 
                 hs_up.append(h)
             if l != self.num_resolutions - 1:
-                h, _ = self.down_modules[f'lvl{l}_rnb_down'].forward_step(
+                h, state[m_idx] = self.down_modules[f'lvl{l}_rnb_down'].forward_step(
                     h, temb, state=state[m_idx])
                 m_idx += 1
 
@@ -510,11 +518,11 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
 
                 h = self.down_modules[f'lvl{l}_combiner'](input_pyramid, h)
 
-        h, _ = self.bottleneck_modules['rnb1'].forward_step(h, temb, state=state[m_idx])
+        h, state[m_idx] = self.bottleneck_modules['rnb1'].forward_step(h, temb, state=state[m_idx])
         m_idx += 1
         if self.attn_bottleneck:
             raise NotImplementedError("Bottleneck attention is currently not implemented for forward_step!")
-        h, _ = self.bottleneck_modules['rnb2'].forward_step(h, temb, state=state[m_idx])
+        h, state[m_idx] = self.bottleneck_modules['rnb2'].forward_step(h, temb, state=state[m_idx])
         m_idx += 1
 
         # Up path
@@ -523,16 +531,16 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
             nrb = self.num_res_blocks + (1 if l == 0 else 0)
             for k in range(nrb):
                 h_input = self.up_modules[f'lvl{l}_combiner{k}'](hs_up.pop(), h)
-                h, _ = self.up_modules[f'lvl{l}_rnb{k}'].forward_step(
+                h, state[m_idx] = self.up_modules[f'lvl{l}_rnb{k}'].forward_step(
                     h_input, temb, state=state[m_idx])
                 m_idx += 1
 
-            pyramid_h, _ = self.up_modules[f'lvl{l}_pyramid_normconv'].forward_step(
+            pyramid_h, state[m_idx] = self.up_modules[f'lvl{l}_pyramid_normconv'].forward_step(
                 h, state=state[m_idx])
             m_idx += 1
 
             if l != self.num_resolutions - 1:
-                pyramid_up, _ = self.pyramid_upsample.forward_step(
+                pyramid_up, state[m_idx] = self.pyramid_upsample.forward_step(
                     pyramid, state=state[m_idx])
                 m_idx += 1
 
@@ -541,7 +549,7 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
                 pyramid = pyramid_h
 
             if l != 0:
-                h, _ = self.up_modules[f'lvl{l}_rnb_up'].forward_step(
+                h, state[m_idx] = self.up_modules[f'lvl{l}_rnb_up'].forward_step(
                     h, temb, state=state[m_idx])
                 m_idx += 1
             else:
@@ -566,21 +574,23 @@ def compress_decoupled_(model, K: int | Callable[[str, nn.Module], int], module_
     """
     if hasattr(model, '_compressed_decoupled') and model._compressed_decoupled:
         print("Model is already compressed, skipping.")
-        return
+        return model
 
     for name, module in model.named_modules():
         if isinstance(module, CausalConv2d):
+            k = K(name, module) if callable(K) else K
+            if not isinstance(k, int) or k < 1:
+                raise ValueError(f"K must be a positive integer for {name}, got {k!r}")
             if np.prod(module.kernel_size) == 1:
                 print(f"NOT compressing {name} (1x1 conv)")
                 continue
-            if K > np.prod(module.kernel_size) or K > module.in_channels or K > module.out_channels:
-                print(f"NOT compressing {name} ({K=} too large)")
+            if k > np.prod(module.kernel_size) or k > module.in_channels or k > module.out_channels:
+                print(f"NOT compressing {name} ({k=} too large)")
                 continue
             if not module_filter(name, module):
                 print(f"NOT compressing {name} (filtered by module_filter)")
                 continue
 
-            k = K(name, module) if callable(K) else K
             print(f"Compressing {name} with K={k}")
             compressed = CausalDecoupledConv2d.from_causal_conv2d(module, K=k)
             # Replace the module in the parent
@@ -592,6 +602,41 @@ def compress_decoupled_(model, K: int | Callable[[str, nn.Module], int], module_
 
     # we store this flag in a registered buffer so it gets saved/loaded with the model state_dict
     model.register_buffer('_compressed_decoupled', torch.tensor(True))
+    return model
+
+
+def prune_resblocks_(model, drop):
+    """Replace listed residual blocks by identity (in-place).
+
+    Only iso-channel blocks (same in/out ch, no freq resample).
+    drop: names like ``["up_modules.lvl2_rnb1"]``.
+    """
+    drop = list(drop)
+    modules = dict(model.named_modules())
+    for name in drop:
+        if name not in modules:
+            raise KeyError(f"prune_resblocks_: no module named {name!r} in the backbone.")
+        module = modules[name]
+        if not isinstance(module, CausalResnetBlockBigGANpp):
+            raise TypeError(
+                f"prune_resblocks_: {name} is a {type(module).__name__}, not a residual block; "
+                "only CausalResnetBlock* blocks can be dropped.")
+        iso = (module.in_ch == module.out_ch) and not module.freq_up and not module.freq_down
+        if not iso:
+            raise ValueError(
+                f"prune_resblocks_: {name} is not iso-channel "
+                f"(in_ch={module.in_ch}, out_ch={module.out_ch}, "
+                f"freq_up={module.freq_up}, freq_down={module.freq_down}); "
+                "dropping it would break the U-Net channel/skip bookkeeping.")
+
+        print(f"Pruning residual block {name} (replacing with StreamingIdentity)")
+        parent = model
+        *path, last = name.split('.')
+        for p in path:
+            parent = getattr(parent, p)
+        setattr(parent, last, StreamingIdentity())
+
+    model.register_buffer('_num_pruned_resblocks', torch.tensor(len(drop)))
     return model
 
 
@@ -675,6 +720,8 @@ class CausalResnetBlockBigGANpp(nn.Module, CausalStreamingModule):
             self.CConv_0.init_state(input_freqs=freqs),
             self.CConv_1.init_state(input_freqs=freqs),
             self.CConv_2.init_state(input_freqs=freqs) if isinstance(self.CConv_2, CausalStreamingModule) else None,
+            # Reserved for optional block-level state without changing the tuple shape again.
+            None,
         )
 
     def forward_step(self, x: torch.Tensor, temb=None, *, state: Tuple) -> Tuple[torch.Tensor, Tuple]:
@@ -699,7 +746,7 @@ class CausalResnetBlockBigGANpp(nn.Module, CausalStreamingModule):
         )
 
         if self.skip_rescale:
-            return (x + h) / np.sqrt(2.), new_state
+            return (x + h) / math.sqrt(2.0), new_state
         else:
             return x + h, new_state
 
@@ -722,7 +769,7 @@ class CausalResnetBlockBigGANpp(nn.Module, CausalStreamingModule):
         x = self.CConv_2(x)
 
         #if self.skip_rescale:
-        return (x + h) / np.sqrt(2.)
+        return (x + h) / math.sqrt(2.0)
 
 
 # Convenient aliases just for clearer intention and model inspection
@@ -808,30 +855,30 @@ class DownOrUpSample(nn.Module, CausalStreamingModule):
 
 
 def upfirdn1d_freq(x, kernel, up=1, down=1):
-    # TODO could be optimized?
+    # Keep this as plain tensor ops; this path is hit in streaming benchmarks.
     assert x.ndim == 4, "Input must be 4D (batch, channel, frequency, time)"
     (B, C, Fr, T) = x.shape
     assert kernel.ndim == 1, "Kernel must be 1D"
 
     out = x
     if up > 1:
-        out = rearrange(out, 'b c f t -> b c f 1 t')
+        out = out.unsqueeze(3)
         # intersperse 0s along frequency
         out = F.pad(out, (0, 0, 0, up - 1), mode='constant', value=0.0)
-        out = rearrange(out, 'b c f pad t -> b c (f pad) t')
+        out = out.reshape(B, C, Fr * up, T)
 
     # Apply 'same' padding along freq
-    if len(kernel) > 1:
-        out = rearrange(out, 'b c fpad t -> (b c t) fpad')
+    if kernel.shape[0] > 1:
+        out = out.permute(0, 1, 3, 2).reshape(B * C * T, out.shape[2])
         kernel_n = kernel.shape[0]
         pad_left = (kernel_n - 1) // 2
         pad_right = kernel_n - 1 - pad_left
         out = F.pad(out, (pad_left, pad_right), mode='constant', value=0.0)
-        out = rearrange(out, 'bct fpad -> bct 1 fpad')
+        out = out.unsqueeze(1)
         # Run the FIR kernel
         w = torch.flip(kernel, dims=(0,)).view(1, 1, kernel_n)
         out = F.conv1d(out, w)
-        out = rearrange(out, '(b c t) 1 fpad -> b c fpad t', b=B, c=C, t=T)
+        out = out.squeeze(1).reshape(B, C, T, out.shape[-1]).permute(0, 1, 3, 2).contiguous()
     # Decimate along frequency
     if down > 1:
         out = out[:, :, ::down, :]
@@ -861,6 +908,7 @@ class CausalConv2d(nn.Conv2d, CausalStreamingModule):
         self.kernel_size = kernel_size
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.depthwise_separable = False
 
         self.time_padding = time_padding
         self.pad_freq = pad_freq
@@ -889,13 +937,31 @@ class CausalConv2d(nn.Conv2d, CausalStreamingModule):
         B, C, Fr, T = x.shape
         xbuf, = state
 
-        # shift buffer to the left by one frame. potential for further optimization here?
-        xbuf[..., :-1] = xbuf[..., 1:].clone()
-        xbuf[..., :, -1] = x[0, :, :, 0].clone()
+        if getattr(self, "functional_state_updates", False):
+            # TensorRT exports recurrent state as engine outputs.  It cannot
+            # accept in-place writes to an input buffer, so this equivalent
+            # functional path constructs the next state explicitly.  The
+            # default stays in-place for the existing PyTorch/CUDA-Graph path.
+            xbuf = torch.cat((xbuf[..., 1:], x[0, :, :, 0].unsqueeze(-1)), dim=-1)
+        else:
+            # shift buffer to the left by one frame. potential for further optimization here?
+            xbuf[..., :-1] = xbuf[..., 1:].clone()
+            xbuf[..., :, -1] = x[0, :, :, 0].clone()
 
         # Run the conv, produces a single output frame
         xbuf_in = xbuf.view(1, C, Fr, -1)
-        h = super().forward(xbuf_in)
+        input_quantizer = getattr(self, "input_quantizer", None)
+        weight_quantizer = getattr(self, "weight_quantizer", None)
+        if input_quantizer is None and weight_quantizer is None:
+            h = super().forward(xbuf_in)
+        else:
+            # PTQ attaches quantizers to the class, but ``super().forward()``
+            # resolves to ``nn.Conv2d.forward`` and would bypass them, leaving
+            # every convolution in float.  Nothing else changes: without
+            # quantizers attached this branch is never taken.
+            conv_in = xbuf_in if input_quantizer is None else input_quantizer(xbuf_in)
+            weight = self.weight if weight_quantizer is None else weight_quantizer(self.weight)
+            h = self._conv_forward(conv_in, weight, self.bias)
         if self.depthwise_separable:
             h = self.pointwise_conv(h)
         return h, (xbuf,)
@@ -1008,9 +1074,12 @@ class CausalDecoupledConv2d(nn.Module, CausalStreamingModule):
         B, C, Fr, T = x.shape
         xbuf, = state
 
-        # shift buffer left
-        xbuf[..., :-1] = xbuf[..., 1:].clone()
-        xbuf[..., :, -1] = x[0, :, :, 0].clone()
+        if getattr(self, "functional_state_updates", False):
+            xbuf = torch.cat((xbuf[..., 1:], x[0, :, :, 0].unsqueeze(-1)), dim=-1)
+        else:
+            # shift buffer left
+            xbuf[..., :-1] = xbuf[..., 1:].clone()
+            xbuf[..., :, -1] = x[0, :, :, 0].clone()
 
         # Run the conv, produces a single output frame
         xbuf_in = xbuf.view(1, C, Fr, -1)
