@@ -1,0 +1,75 @@
+# Precision sweep: fp32 vs fp16, on SE and phase-retrieval (stftpr).
+# Grid: task {se, stftpr} x dtype {fp32, fp16} = 4 runs.
+# (bf16 dropped - unsupported by the complex-valued backbone; see dtype note below.)
+#
+# Paired comparison: same 100 test files for every dtype (fixed selection_seed),
+# so per-file fp16-vs-fp32 differences are directly comparable.
+# No presets: config/ckpt resolve from the task defaults (se_predgen / stftpr).
+#
+# Launch (4 L4 GPUs in parallel):
+#   .venv/bin/python experiments/evaluation/run_eval_sweep.py \
+#     --sweep-yaml experiments/evaluation/sweep_precision_dtype.yaml \
+#     --group precision-dtype-v1 --workers 4 --resume
+
+name: streamfm-eval-precision-dtype
+project: streamfm-evals
+entity: damien-brgs92-heriot-watt-university
+method: grid
+
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    values:
+      - se
+      - stftpr
+  split:
+    value: test
+  part:
+    value: model
+  pipeline:
+    value: offline
+  execution:
+    value: eager
+  steps:
+    value: 1
+  # bf16 is dropped: the NCSN++ backbone uses torch.view_as_complex, which has no
+  # bfloat16 CUDA kernel, so the full pipeline cannot run in bf16 (the eval fails
+  # fast on it). fp16 works via the full-precision STFT boundary; fp32 is reference.
+  dtype:
+    values:
+      - fp32
+      - fp16
+  memory_format:
+    value: contiguous
+  # Re-runs reuse the stable run-name output dir; overwrite avoids FileExistsError
+  # on the enhanced/*.wav from a prior partial run.
+  overwrite:
+    value: true
+  limit:
+    value: 100
+  offset:
+    value: 0
+  selection:
+    value: random
+  selection_seed:
+    value: 42
+  seed:
+    value: 42
+  crop_mode:
+    value: full
+  score_after_run:
+    value: true
+  score_include_stats:
+    value: true
+  score_include_per_file:
+    value: true
+  score_with_distillmos:
+    value: true
+  wandb:
+    value: true
+
+presets: {}
+exclude: []

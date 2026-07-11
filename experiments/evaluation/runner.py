@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -230,6 +231,15 @@ def run_test_set_inference(
     )
     solver, steps = parse_solver_and_steps(solver, steps)
     model_dtype = parse_model_dtype(model_dtype_name)
+    if model_dtype == torch.bfloat16:
+        # The DNN backbone runs complex-valued ops (torch.view_as_complex in the
+        # NCSN++ U-Net), which have no bfloat16 CUDA kernel, so the full inference
+        # pipeline cannot run in bf16. fp16 works (complex-half is supported) and
+        # fp32 is the reference. Fail fast instead of burning a GPU job.
+        raise ValueError(
+            "bf16 is not supported for full-pipeline evaluation: the backbone uses "
+            "torch.view_as_complex, which has no bfloat16 kernel. Use 'fp16' or 'fp32'."
+        )
     model_memory_format = normalize_model_memory_format(model_memory_format)
     crop_mode = crop_mode.lower().replace("-", "_")
     if crop_mode not in {"config", "full"}:
@@ -259,8 +269,13 @@ def run_test_set_inference(
     model = apply_checkpoint_compression_(model, checkpoint)
     model.load_state_dict(checkpoint["state_dict"])
     model = model.eval().to(device=device)
-    if model_dtype != torch.float32:
-        model = model.to(dtype=model_dtype)
+    # For fp16/bf16 we use autocast instead of casting the weights: the STFT/iSTFT
+    # front-end runs through cuFFT and torch.polar, neither of which has a CUDA
+    # half-precision kernel, so a whole-model cast crashes ("cuFFT doesn't support
+    # BFloat16" / "polar_cuda not implemented for 'Half'"). Autocast keeps those
+    # ops in fp32 while running the DNN backbone (matmul/conv) in reduced precision,
+    # which is the meaningful precision comparison here.
+    use_autocast = model_dtype != torch.float32
     model = apply_model_memory_format(model, model_memory_format)
     model = _apply_execution(model, execution)
 
@@ -317,17 +332,25 @@ def run_test_set_inference(
                 if device.type == "cuda":
                     torch.cuda.manual_seed_all(file_seed)
 
-                y_model = y.to(device=device, dtype=model_dtype)
-                x_hat = _enhance_one(
-                    model=model,
-                    y=y_model,
-                    sr=sr,
-                    part=part,
-                    task=task,
-                    solver=solver,
-                    steps=steps,
-                    seed=file_seed,
+                # Keep the input (and weights) in fp32; autocast handles the
+                # reduced-precision compute so the STFT front-end stays in fp32.
+                y_model = y.to(device=device)
+                autocast_ctx = (
+                    torch.autocast(device_type=device.type, dtype=model_dtype)
+                    if use_autocast
+                    else contextlib.nullcontext()
                 )
+                with autocast_ctx:
+                    x_hat = _enhance_one(
+                        model=model,
+                        y=y_model,
+                        sr=sr,
+                        part=part,
+                        task=task,
+                        solver=solver,
+                        steps=steps,
+                        seed=file_seed,
+                    )
                 if x_hat.ndim == 1:
                     x_hat = x_hat.unsqueeze(0)
                 x_hat = x_hat.detach().cpu().float()
