@@ -1,0 +1,34 @@
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: cuda_graph
+  steps:
+    value: 1
+  dtype:
+    value: fp16
+  memory_format:
+    value: channels_last
+  matmul_precision:
+    values:
+      - highest
+      - high
+      - medium
+  iterations:
+    value: 100
+  warmup:
+    value: 10
+
+exclude: []

@@ -70,6 +70,14 @@ def normalize_model_memory_format(memory_format: str) -> str:
     return normalized
 
 
+def normalize_float32_matmul_precision(precision: str) -> str:
+    """Normalize torch float32 matmul precision modes."""
+    normalized = precision.lower().replace("-", "_")
+    if normalized not in {"highest", "high", "medium"}:
+        raise ValueError("Unsupported matmul precision. Use 'highest', 'high', or 'medium'.")
+    return normalized
+
+
 def torch_model_memory_format(memory_format: str):
     """Return the torch memory_format object for 4D model tensors."""
     torch = _torch()
