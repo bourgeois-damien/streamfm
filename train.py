@@ -1,6 +1,7 @@
 import copy
 import os
 import warnings
+from pathlib import Path
 
 import hydra
 from hydra.core.hydra_config import HydraConfig
@@ -11,6 +12,7 @@ import random
 import numpy as np
 import torch, torchaudio
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 from sgmse.util.distributed import is_rank_zero
 
@@ -46,7 +48,7 @@ def main(cfg: omegaconf.DictConfig) -> None:
 
     config_name = getattr(cfg, 'config_name', HydraConfig.get()['job']['config_name'])
     logger_constructor = instantiate(cfg.logger)
-    logger = logger_constructor(name=config_name)
+    logger = logger_constructor(name=cfg.get('wandb_run_name', config_name))
     if is_wandb(logger):
         run = logger.experiment
         run_id = run.id
@@ -68,6 +70,30 @@ def main(cfg: omegaconf.DictConfig) -> None:
     trainer_constructor = instantiate(cfg.trainer_constructor)
     trainer = trainer_constructor(logger=logger, default_root_dir=cfg.get('req_ckpt_path', None))
     assert isinstance(trainer, pl.Trainer)
+
+    # Long-running cloud jobs need a recovery point more often than once per
+    # validation epoch.  Keep this opt-in so the published experiment configs
+    # retain their original checkpoint policy, while launchers can request
+    # durable step-based snapshots with a Hydra override.
+    checkpoint_every_n_train_steps = cfg.get('checkpoint_every_n_train_steps', None)
+    if checkpoint_every_n_train_steps is not None:
+        checkpoint_every_n_train_steps = int(checkpoint_every_n_train_steps)
+        if checkpoint_every_n_train_steps <= 0:
+            raise ValueError("checkpoint_every_n_train_steps must be a positive integer.")
+        checkpoint_dir = Path(trainer.default_root_dir) / "checkpoints"
+        trainer.callbacks.append(
+            ModelCheckpoint(
+                dirpath=str(checkpoint_dir),
+                filename="step={step:08d}",
+                every_n_train_steps=checkpoint_every_n_train_steps,
+                save_top_k=2,
+                save_last=True,
+            )
+        )
+        print(
+            "Enabled step-based recovery checkpoints every "
+            f"{checkpoint_every_n_train_steps} training steps in {checkpoint_dir}."
+        )
 
     # Print # of devices that trainer uses
     print("Number of devices: ", trainer.num_devices)

@@ -57,6 +57,79 @@ gdown https://drive.google.com/drive/folders/1u2QKjGAdxblQVV8-qmifSM9AwhT86LER?u
   python fit_rk_scheme.py --config-name LRK5_streamfm_bwe
   ```
 
+### Training on Modal with Weights & Biases
+
+[`experiments/training/modal_train.py`](experiments/training/modal_train.py) is the durable Modal launcher for new training runs. It mounts the existing `streamfm-cache` Volume at `/data` for datasets and a dedicated `streamfm-runs` Volume at `/runs` for checkpoints, TensorBoard files, and W&B local artifacts.
+
+One-time setup on the machine from which you launch runs:
+
+```bash
+python3 -m pip install "modal>=1.0,<2"
+modal setup
+modal secret create wandb WANDB_API_KEY=YOUR_WANDB_API_KEY
+```
+
+Prepare the training datasets in the `streamfm-cache` Volume first, using [`experiments/datasets/modal_dataset_setup.py`](experiments/datasets/modal_dataset_setup.py). The training launcher maps the standard config paths automatically to `/data/datasets/...`.
+
+Start with a short fresh-training smoke test (the checkpoint is written every 10 steps):
+
+```bash
+modal run experiments/training/modal_train.py \
+  --hardware L4 \
+  --config-name streamfm_bwe \
+  --mode from_scratch \
+  --run-name smoke-bwe-v1 \
+  --max-steps 10 \
+  --batch-size 2 \
+  --checkpoint-every-n-steps 10 \
+  --wandb-project streamflow \
+  --wandb-group smoke-tests
+```
+
+Fine-tune a provided full checkpoint using the matching model config:
+
+```bash
+modal run experiments/training/modal_train.py \
+  --hardware A100:2 \
+  --config-name streamfm_bwe \
+  --mode finetune \
+  --seed-checkpoint streamfm_bwe.ckpt \
+  --run-name ft-bwe-mydata-v1 \
+  --checkpoint-every-n-steps 500 \
+  --wandb-project streamflow \
+  --wandb-group bwe-finetuning \
+  --wandb-tags finetune,bwe,a100
+```
+
+Resume an interrupted or deliberately stopped run by keeping its exact `run_name`:
+
+```bash
+modal run experiments/training/modal_train.py \
+  --hardware A100:2 \
+  --config-name streamfm_bwe \
+  --mode resume \
+  --run-name ft-bwe-mydata-v1 \
+  --checkpoint-every-n-steps 500 \
+  --wandb-project streamflow \
+  --wandb-group bwe-finetuning
+```
+
+The launcher uses the run name as the W&B run ID and sets `WANDB_RESUME=allow`, so charts remain continuous across restarts. It supports `L4`, `L40S`, `A100`, and `A100:2`. The two-GPU option retains the DDP configuration; single-GPU options switch Lightning to `strategy=auto`.
+
+For a custom data source or experimental model setting, pass one Hydra override per line through `--config-override`; these overrides take precedence over the standard Modal dataset paths. For example:
+
+```bash
+modal run experiments/training/modal_train.py \
+  --hardware L40S \
+  --config-name streamfm_bwe \
+  --mode finetune \
+  --seed-checkpoint streamfm_bwe.ckpt \
+  --run-name ft-bwe-custom-v1 \
+  --config-override $'model.lr=1e-4\nmodel.data_module.train_path=/data/datasets/my_bwe/train\nmodel.data_module.valid_path=/data/datasets/my_bwe/valid'
+```
+
+For later fine-tuning from a checkpoint produced by a prior run, use its absolute volume path as `--seed-checkpoint`, e.g. `/runs/training/ft-bwe-mydata-v1/checkpoints/last.ckpt`. The initial project checkpoints can be used directly by filename. Use full `.ckpt` files for fine-tuning or resuming; the `*_dnn_only.pt` files are inference/backbone artifacts, not full Lightning training checkpoints.
+
 
 ## Inference
 
