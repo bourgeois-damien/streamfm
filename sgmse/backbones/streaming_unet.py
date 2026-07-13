@@ -3,6 +3,7 @@ import warnings
 
 import abc
 import functools
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -111,7 +112,7 @@ class CausalAttnBlockpp(nn.Module):
         if not self.skip_rescale:
             return x + h
         else:
-            return (x + h) / np.sqrt(2.)
+            return (x + h) / math.sqrt(2.0)
 
 
 
@@ -703,7 +704,7 @@ class CausalResnetBlockBigGANpp(nn.Module, CausalStreamingModule):
         )
 
         if self.skip_rescale:
-            return (x + h) / np.sqrt(2.), new_state
+            return (x + h) / math.sqrt(2.0), new_state
         else:
             return x + h, new_state
 
@@ -726,7 +727,7 @@ class CausalResnetBlockBigGANpp(nn.Module, CausalStreamingModule):
         x = self.CConv_2(x)
 
         #if self.skip_rescale:
-        return (x + h) / np.sqrt(2.)
+        return (x + h) / math.sqrt(2.0)
 
 
 # Convenient aliases just for clearer intention and model inspection

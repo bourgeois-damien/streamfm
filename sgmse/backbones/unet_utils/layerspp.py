@@ -20,6 +20,7 @@
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
+import math
 import numpy as np
 import string
 
@@ -150,7 +151,7 @@ class Combine(nn.Module):
     elif self.method == 'sum':
       return h + y
     elif self.method == 'sum_rescaled':
-      return (h + y) / np.sqrt(2)
+      return (h + y) / math.sqrt(2.0)
     else:
       raise ValueError(f'Method {self.method} not recognized.')
 
@@ -185,4 +186,4 @@ class AttnBlockpp(nn.Module):
     if not self.skip_rescale:
       return x + h
     else:
-      return (x + h) / np.sqrt(2.)
+      return (x + h) / math.sqrt(2.0)
