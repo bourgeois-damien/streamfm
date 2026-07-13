@@ -34,6 +34,7 @@ image = (
         "torchaudio==2.7.0",
         "audiomentations==0.41.0",
         "distillmos==0.9.1",
+        "einops==0.8.1",
         "numpy==1.26.4",
         "pandas==2.2.3",
         "pesq==0.0.4",
@@ -88,8 +89,14 @@ def score_remote(
     include_per_file: bool,
     include_stats: bool,
     score_target: str,
+    phase_mode: str = "random",
+    phase_seed: int = 1234,
 ) -> dict:
-    from experiments.evaluation.score_manifest import score_dataset_noisy, score_manifest
+    from experiments.evaluation.score_manifest import (
+        score_dataset_noisy,
+        score_dataset_phaseless,
+        score_manifest,
+    )
 
     if output_json:
         output_path = Path(output_json)
@@ -98,6 +105,9 @@ def score_remote(
     elif source == "dataset":
         suffix = f"limit{limit}" if limit > 0 else "all"
         output_path = Path(VOLUME_ROOT) / "outputs" / "dataset_scores" / f"{task}_{split}_noisy_{suffix}.json"
+    elif source == "dataset_phaseless":
+        suffix = f"limit{limit}" if limit > 0 else "all"
+        output_path = Path(VOLUME_ROOT) / "outputs" / "dataset_scores" / f"{task}_{split}_phaseless_{phase_mode}_{suffix}.json"
     else:
         manifest_path = _resolve_manifest(run_name, manifest)
         suffix = f"limit{limit}" if limit > 0 else "all"
@@ -115,6 +125,26 @@ def score_remote(
             selection_seed=selection_seed,
             crop_mode=crop_mode,
             output_json=output_path,
+            include_per_file=include_per_file,
+            include_stats=include_stats,
+        )
+        CACHE_VOLUME.commit()
+        return result
+
+    if source == "dataset_phaseless":
+        result = score_dataset_phaseless(
+            task=task,
+            data_path=data_path,
+            data_format=data_format,
+            split=split,
+            limit=limit,
+            offset=offset,
+            selection=selection,
+            selection_seed=selection_seed,
+            crop_mode=crop_mode,
+            output_json=output_path,
+            phase_mode=phase_mode,
+            phase_seed=phase_seed,
             include_per_file=include_per_file,
             include_stats=include_stats,
         )
@@ -154,8 +184,13 @@ def main(
     include_per_file: bool = False,
     include_stats: bool = False,
     score_target: str = "enhanced",
+    phase_mode: str = "random",
+    phase_seed: int = 1234,
+    local_json: str = "",
 ):
-    score_remote.remote(
+    import json as _json
+
+    result = score_remote.remote(
         source=source,
         run_name=run_name,
         manifest=manifest,
@@ -173,4 +208,11 @@ def main(
         include_per_file=include_per_file,
         include_stats=include_stats,
         score_target=score_target,
+        phase_mode=phase_mode,
+        phase_seed=phase_seed,
     )
+    if local_json:
+        local_path = Path(local_json)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_text(_json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"Saved result locally to {local_path}")
