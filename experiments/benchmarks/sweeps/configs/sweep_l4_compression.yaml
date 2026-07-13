@@ -1,0 +1,40 @@
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: cuda_graph
+  dtype:
+    value: fp16
+  memory_format:
+    value: channels_last
+  steps:
+    value: 1
+  iterations:
+    value: 500
+  warmup:
+    value: 50
+  ckpt:
+    values:
+      - ""
+      - streamfm_stftpr_k1.ckpt
+      - streamfm_stftpr_k2.ckpt
+      - streamfm_stftpr_k3.ckpt
+      - streamfm_stftpr_k4.ckpt
+      - streamfm_stftpr_k5.ckpt
+      - streamfm_stftpr_k6.ckpt
+      - streamfm_stftpr_k7.ckpt
+      - streamfm_stftpr_k8.ckpt
+
+exclude: []

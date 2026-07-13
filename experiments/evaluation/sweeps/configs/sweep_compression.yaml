@@ -1,0 +1,101 @@
+name: streamfm-eval-compression
+project: streamfm-evals
+entity: damien-brgs92-heriot-watt-university
+method: grid
+
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  split:
+    value: test
+  part:
+    value: model
+  pipeline:
+    value: offline
+  execution:
+    value: eager
+  memory_format:
+    value: contiguous
+  steps:
+    value: 1
+  dtype:
+    value: fp16
+  limit:
+    value: 100
+  offset:
+    value: 0
+  selection:
+    value: random
+  selection_seed:
+    value: 42
+  seed:
+    value: 42
+  crop_mode:
+    value: full
+  overwrite:
+    value: true
+  score_after_run:
+    value: true
+  score_include_stats:
+    value: true
+  score_include_per_file:
+    value: true
+  score_with_distillmos:
+    value: true
+  wandb:
+    value: true
+  variant:
+    values:
+      - baseline
+      - k1
+      - k2
+      - k3
+      - k4
+      - k5
+      - k6
+      - k7
+      - k8
+
+presets:
+  baseline:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr.ckpt
+    config_overrides: []
+  k1:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k1.ckpt
+    config_overrides: []
+  k2:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k2.ckpt
+    config_overrides: []
+  k3:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k3.ckpt
+    config_overrides: []
+  k4:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k4.ckpt
+    config_overrides: []
+  k5:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k5.ckpt
+    config_overrides: []
+  k6:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k6.ckpt
+    config_overrides: []
+  k7:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k7.ckpt
+    config_overrides: []
+  k8:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k8.ckpt
+    config_overrides: []
+
+exclude: []
