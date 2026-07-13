@@ -167,6 +167,20 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         default=False,
         help="Reuse model input/state buffers where possible.",
     )
+    parser.add_argument(
+        "--ptq-int8",
+        default="",
+        help=(
+            "Optional INT8 PTQ components: linear, conv, causal_conv, all "
+            "(comma-separated). CPU + fp32 + eager only."
+        ),
+    )
+    parser.add_argument(
+        "--ptq-calib-steps",
+        type=int,
+        default=32,
+        help="Calibration mini-batches for static PTQ components.",
+    )
     parser.add_argument("--output-json", default="")
     parser.add_argument("--history-json", default="")
     parser.add_argument("--save-audio", action="store_true", help="Save returned audio for --pipeline audio runs.")
@@ -242,6 +256,8 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
         profile_all=args.profile_all,
         profile_file=args.profile_file,
         checkpoint_name=args.ckpt,
+        ptq_int8=args.ptq_int8,
+        ptq_calib_steps=args.ptq_calib_steps,
     )
     _save_audio_results(results, args, backend="local", hardware=hardware)
     record_benchmark_results(
@@ -272,6 +288,8 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
             "num_interop_threads": args.num_interop_threads,
             "memory_format": args.memory_format,
             "preallocate_model_buffers": args.preallocate_model_buffers,
+            "ptq_int8": args.ptq_int8,
+            "ptq_calib_steps": args.ptq_calib_steps,
             "save_audio": args.save_audio,
             "audio_output_dir": args.audio_output_dir,
             "input_audio": args.input_audio_path,
@@ -326,6 +344,9 @@ def _run_modal(args: argparse.Namespace, hardware: str) -> None:
         command.extend(["--memory-format", args.memory_format])
     if args.preallocate_model_buffers:
         command.append("--preallocate-model-buffers")
+    if args.ptq_int8:
+        command.extend(["--ptq-int8", args.ptq_int8])
+        command.extend(["--ptq-calib-steps", str(args.ptq_calib_steps)])
     if args.save_audio:
         command.append("--save-audio")
     if args.profile:

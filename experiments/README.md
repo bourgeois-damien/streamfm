@@ -272,6 +272,32 @@ Puis lancer la grille avec un nom stable, qui permet aussi de reprendre les essa
 
 Les variantes nommées (`baseline`, `quant_int8`, `svd_50`, etc.) se définissent dans `presets`. Chaque preset peut choisir son `config_name`, son `ckpt` et une liste de `config_overrides`. Les paramètres inconnus sont refusés afin d'éviter qu'une option de compression soit seulement journalisée sans être réellement appliquée au modèle.
 
+### PTQ INT8 (benchmark CPU)
+
+Post-training INT8 est branché sur les benchmarks via `--ptq-int8` (composants séparés par des virgules) :
+
+- `linear` — dynamic INT8 sur les `nn.Linear`
+- `conv` — static INT8 sur les `nn.Conv2d` plaines (ex. depthwise/pointwise après SVD)
+- `causal_conv` — static INT8 sur `CausalConv2d` (wrapper streaming)
+- `all` — les trois
+
+Contraintes : **CPU**, **fp32**, **eager**. Exemple :
+
+```bash
+python experiments/benchmarks/streamfm_benchmark.py --local --hardware cpu \
+  --task stftpr --pipeline audio --execution eager --dtype fp32 \
+  --ptq-int8 causal_conv --ptq-calib-steps 32 \
+  --num-threads 1 --num-interop-threads 1
+```
+
+Grille de smoke :
+
+```bash
+python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+  --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_local_cpu_ptq_int8.yaml \
+  --wandb-group local-cpu-ptq-int8
+```
+
 ### 5. Commandes de smoke test rapides
 
 ```bash

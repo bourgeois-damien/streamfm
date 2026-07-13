@@ -44,6 +44,45 @@ def _float_or_default(value, default: float) -> float:
         return default
 
 
+def _apply_ptq_int8_if_requested(
+    model,
+    *,
+    ptq_int8: str,
+    ptq_calib_steps: int,
+    device,
+    use_compiled: bool,
+    model_dtype=None,
+):
+    """Optionally apply INT8 PTQ. Returns (model, ptq_meta_or_none, model_dtype)."""
+    from sgmse.util.ptq_int8 import apply_ptq_int8_, describe_ptq, parse_ptq_components
+    import torch
+
+    components = parse_ptq_components(ptq_int8)
+    if not components:
+        return model, None, model_dtype
+    if device.type != "cpu":
+        raise ValueError(
+            "PTQ INT8 currently requires a CPU device (PyTorch quantized kernels). "
+            "Use --hardware cpu / --backend local with hardware=cpu."
+        )
+    if use_compiled:
+        raise ValueError(
+            "PTQ INT8 requires --execution eager "
+            "(torch.compile / cuda_graph are incompatible with quantized modules)."
+        )
+    model = apply_ptq_int8_(model, components, calib_steps=ptq_calib_steps)
+    # Quantized modules expect float activations; keep benchmark tensors in fp32.
+    if model_dtype is not None and model_dtype != torch.float32:
+        print(
+            f"Warning: overriding benchmark model_dtype {model_dtype} → float32 after PTQ "
+            f"(quantized modules use float I/O).",
+            flush=True,
+        )
+        model_dtype = torch.float32
+    print(f"Applied PTQ INT8 components={list(components)} calib_steps={ptq_calib_steps}", flush=True)
+    return model, describe_ptq(model), model_dtype
+
+
 def _streaming_config_from_model_cfg(cfg):
     """Create a synthetic streaming STFT config matching a Stream.FM model config."""
     from experiments.streaming.pipeline import StreamingSTFTConfig
@@ -101,10 +140,20 @@ def _benchmark_flow_task(
     save_audio: bool,
     input_audio_path: str,
     checkpoint_name: str = "",
+    ptq_int8: str = "",
+    ptq_calib_steps: int = 32,
 ) -> tuple[list[dict], float, float]:
     """Load and benchmark a flow-only task."""
     load_started_at = time.perf_counter()
     model, cfg = load_flow_model(device, model_dtype, paths, task=task, checkpoint_name=checkpoint_name or None)
+    model, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
+        model,
+        ptq_int8=ptq_int8,
+        ptq_calib_steps=ptq_calib_steps,
+        device=device,
+        use_compiled=use_compiled,
+        model_dtype=model_dtype,
+    )
     model = apply_model_memory_format(model, model_memory_format)
     config = _streaming_config_from_model_cfg(cfg)
     freq_bins = int(getattr(model, "input_freqs", config.n_fft // 2 + 1 - config.cut_highest_freqs))
@@ -210,6 +259,10 @@ def _benchmark_flow_task(
 
     for row in results:
         row["task"] = task
+        if _ptq_meta is not None:
+            row["ptq_int8"] = ",".join(_ptq_meta.get("components", []))
+            row["ptq_engine"] = _ptq_meta.get("engine", "")
+            row["ptq_calib_steps"] = _ptq_meta.get("calib_steps", ptq_calib_steps)
 
     return results, load_s, time.perf_counter() - bench_started_at
 
@@ -227,10 +280,20 @@ def _benchmark_se_predictor_task(
     save_audio: bool,
     input_audio_path: str,
     checkpoint_name: str = "",
+    ptq_int8: str = "",
+    ptq_calib_steps: int = 32,
 ) -> tuple[list[dict], float, float]:
     """Load and benchmark the SE predictor-only task."""
     load_started_at = time.perf_counter()
     predictor, _ = load_se_predictor(device, dtype=model_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
+    predictor, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
+        predictor,
+        ptq_int8=ptq_int8,
+        ptq_calib_steps=ptq_calib_steps,
+        device=device,
+        use_compiled=use_compiled,
+        model_dtype=model_dtype,
+    )
     predictor = apply_model_memory_format(predictor, model_memory_format)
     load_s = time.perf_counter() - load_started_at
     bench_started_at = time.perf_counter()
@@ -258,6 +321,12 @@ def _benchmark_se_predictor_task(
     else:
         raise ValueError("SE predictor supports only model_only pipeline.")
 
+    if _ptq_meta is not None:
+        for row in results:
+            row["ptq_int8"] = ",".join(_ptq_meta.get("components", []))
+            row["ptq_engine"] = _ptq_meta.get("engine", "")
+            row["ptq_calib_steps"] = _ptq_meta.get("calib_steps", ptq_calib_steps)
+
     return results, load_s, time.perf_counter() - bench_started_at
 
 
@@ -276,10 +345,20 @@ def _benchmark_se_flow_task(
     save_audio: bool,
     input_audio_path: str,
     checkpoint_name: str = "",
+    ptq_int8: str = "",
+    ptq_calib_steps: int = 32,
 ) -> tuple[list[dict], float, float]:
     """Load and benchmark the SE flow-only task."""
     load_started_at = time.perf_counter()
     flow, flow_cfg = load_se_flow(device, dtype=model_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
+    flow, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
+        flow,
+        ptq_int8=ptq_int8,
+        ptq_calib_steps=ptq_calib_steps,
+        device=device,
+        use_compiled=use_compiled,
+        model_dtype=model_dtype,
+    )
     flow = apply_model_memory_format(flow, model_memory_format)
     sigma_e = float(flow_cfg.model.sigma_e)
     load_s = time.perf_counter() - load_started_at
@@ -313,6 +392,12 @@ def _benchmark_se_flow_task(
     else:
         raise ValueError("SE flow supports only model_only pipeline.")
 
+    if _ptq_meta is not None:
+        for row in results:
+            row["ptq_int8"] = ",".join(_ptq_meta.get("components", []))
+            row["ptq_engine"] = _ptq_meta.get("engine", "")
+            row["ptq_calib_steps"] = _ptq_meta.get("calib_steps", ptq_calib_steps)
+
     return results, load_s, time.perf_counter() - bench_started_at
 
 
@@ -331,10 +416,29 @@ def _benchmark_se_full_task(
     save_audio: bool,
     input_audio_path: str,
     checkpoint_name: str = "",
+    ptq_int8: str = "",
+    ptq_calib_steps: int = 32,
 ) -> tuple[list[dict], float, float]:
     """Load and benchmark the full SE task."""
     load_started_at = time.perf_counter()
     se_model = load_se_full(device, dtype=model_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
+    se_model["predictor"], _ptq_meta_pred, model_dtype = _apply_ptq_int8_if_requested(
+        se_model["predictor"],
+        ptq_int8=ptq_int8,
+        ptq_calib_steps=ptq_calib_steps,
+        device=device,
+        use_compiled=use_compiled,
+        model_dtype=model_dtype,
+    )
+    se_model["flow"], _ptq_meta_flow, model_dtype = _apply_ptq_int8_if_requested(
+        se_model["flow"],
+        ptq_int8=ptq_int8,
+        ptq_calib_steps=ptq_calib_steps,
+        device=device,
+        use_compiled=use_compiled,
+        model_dtype=model_dtype,
+    )
+    _ptq_meta = _ptq_meta_flow or _ptq_meta_pred
     se_model["predictor"] = apply_model_memory_format(se_model["predictor"], model_memory_format)
     se_model["flow"] = apply_model_memory_format(se_model["flow"], model_memory_format)
     load_s = time.perf_counter() - load_started_at
@@ -443,6 +547,12 @@ def _benchmark_se_full_task(
     else:
         raise ValueError("Unsupported SE full pipeline.")
 
+    if _ptq_meta is not None:
+        for row in results:
+            row["ptq_int8"] = ",".join(_ptq_meta.get("components", []))
+            row["ptq_engine"] = _ptq_meta.get("engine", "")
+            row["ptq_calib_steps"] = _ptq_meta.get("calib_steps", ptq_calib_steps)
+
     return results, load_s, time.perf_counter() - bench_started_at
 
 
@@ -462,6 +572,8 @@ def run_internal_benchmark(
     save_audio: bool = False,
     input_audio_path: str = "",
     checkpoint_name: str = "",
+    ptq_int8: str = "",
+    ptq_calib_steps: int = 32,
 ) -> tuple[list[dict], float, float]:
     """Dispatch a benchmark run for an already-normalized task/pipeline."""
     model_dtype = parse_model_dtype(model_dtype_name)
@@ -483,6 +595,8 @@ def run_internal_benchmark(
             save_audio=save_audio,
             input_audio_path=input_audio_path,
             checkpoint_name=checkpoint_name,
+            ptq_int8=ptq_int8,
+            ptq_calib_steps=ptq_calib_steps,
         )
     if internal_task == "se_predictor":
         return _benchmark_se_predictor_task(
@@ -497,6 +611,8 @@ def run_internal_benchmark(
             save_audio=save_audio,
             input_audio_path=input_audio_path,
             checkpoint_name=checkpoint_name,
+            ptq_int8=ptq_int8,
+            ptq_calib_steps=ptq_calib_steps,
         )
     if internal_task == "se_flow":
         return _benchmark_se_flow_task(
@@ -513,6 +629,8 @@ def run_internal_benchmark(
             save_audio=save_audio,
             input_audio_path=input_audio_path,
             checkpoint_name=checkpoint_name,
+            ptq_int8=ptq_int8,
+            ptq_calib_steps=ptq_calib_steps,
         )
     if internal_task == "se_full":
         return _benchmark_se_full_task(
@@ -529,6 +647,8 @@ def run_internal_benchmark(
             save_audio=save_audio,
             input_audio_path=input_audio_path,
             checkpoint_name=checkpoint_name,
+            ptq_int8=ptq_int8,
+            ptq_calib_steps=ptq_calib_steps,
         )
     raise ValueError("Unsupported internal task.")
 
@@ -559,6 +679,8 @@ def run_benchmark(
     profile_all: bool = False,
     profile_file: str = "",
     checkpoint_name: str = "",
+    ptq_int8: str = "",
+    ptq_calib_steps: int = 32,
 ) -> list[dict]:
     """Run one benchmark using the common local/Modal benchmark implementation."""
     import torch
@@ -617,6 +739,8 @@ def run_benchmark(
             save_audio=save_audio,
             input_audio_path=input_audio_path,
             checkpoint_name=checkpoint_name,
+            ptq_int8=ptq_int8,
+            ptq_calib_steps=ptq_calib_steps,
         )
 
     profiler_output = ""

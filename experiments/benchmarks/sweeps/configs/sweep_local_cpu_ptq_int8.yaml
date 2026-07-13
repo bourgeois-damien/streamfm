@@ -1,0 +1,51 @@
+# Local CPU PTQ INT8 comparison (stftpr, steps=1, threads 1/1).
+# Same PTQ options as v2, but channels_last (better local CPU baseline from prior sweeps).
+# Note: execution stays eager — required for PTQ.
+#
+#   python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_local_cpu_ptq_int8.yaml \
+#     --wandb-group local-cpu-ptq-int8-channels-last
+#
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: local
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: model_only
+  execution:
+    value: eager
+  steps:
+    value: 1
+  dtype:
+    value: fp32
+  memory_format:
+    value: channels_last
+  preallocate_model_buffers:
+    value: true
+  iterations:
+    value: 40
+  warmup:
+    value: 10
+  num_threads:
+    value: 1
+  num_interop_threads:
+    value: 1
+  hardware:
+    value: cpu
+  ptq_calib_steps:
+    value: 16
+  ptq_int8:
+    values:
+      - "none"
+      - linear
+      - conv
+      - causal_conv
+      - linear,causal_conv
+      - all
