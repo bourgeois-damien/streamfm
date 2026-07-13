@@ -555,6 +555,150 @@ def score_dataset_noisy(
     return summary
 
 
+def _build_stftpr_extractor():
+    """Feature extractor matching config/streamfm_stftpr.yaml (n_fft=512, hop=256,
+    sqrt-Hann, alpha=0.5, normalized STFT, Nyquist bin cut). Used to build the
+    phase-retrieval degraded input from clean audio."""
+    from sgmse.feature_extractors import CompressedAmplitudeComplexSTFT
+
+    return CompressedAmplitudeComplexSTFT(
+        window="hann",
+        n_fft=512,
+        hop_length=256,
+        sampling_rate=16000,
+        alpha=0.5,
+        beta=1.0,
+        compression_is_learnable=False,
+        normalized_stft=True,
+        cut_highest_freqs=1,
+        sqrt_window=True,
+    )
+
+
+def _phase_retrieval_degrade(
+    clean: torch.Tensor,
+    extractor,
+    *,
+    phase_mode: str,
+    seed: int,
+) -> torch.Tensor:
+    """Build the phase-retrieval degraded input for a clean signal.
+
+    Mirrors what the FlowModel sees at inference: it keeps only the STFT
+    magnitude (``post_Y_fn=ComplexAbs``) and must recover the phase. Here we
+    reconstruct a time-domain signal from that magnitude with either zeroed or
+    random phase, so metrics quantify the starting-point degradation.
+
+    clean: [1, T] mono tensor. Returns a [1, T] degraded tensor.
+    """
+    x = clean.unsqueeze(0)  # [B=1, C=1, T]
+    spec = extractor.forward(x)  # compressed complex STFT [1, 1, F, T]
+    magnitude = spec.abs()
+    if phase_mode == "zero":
+        degraded_spec = magnitude + 0j
+    elif phase_mode == "random":
+        generator = torch.Generator().manual_seed(seed)
+        phase = (torch.rand(magnitude.shape, generator=generator) * 2.0 - 1.0) * math.pi
+        degraded_spec = torch.polar(magnitude, phase)
+    else:
+        raise ValueError("phase_mode must be 'zero' or 'random'.")
+    degraded = extractor.invert(degraded_spec, T_orig=x.shape[-1])  # [1, 1, T]
+    return degraded[0]  # [1, T]
+
+
+def score_dataset_phaseless(
+    *,
+    task: str,
+    data_path: str,
+    data_format: str,
+    split: str,
+    limit: int,
+    offset: int,
+    selection: str,
+    selection_seed: int,
+    crop_mode: str,
+    output_json: Path | None,
+    phase_mode: str = "random",
+    phase_seed: int = 1234,
+    include_per_file: bool = False,
+    include_stats: bool = False,
+) -> dict:
+    """Score the phase-retrieval degraded input (magnitude-only reconstruction)
+    against clean, per file. No model inference: the degraded signal is derived
+    from the clean STFT magnitude, matching what the stftpr model starts from."""
+    crop_mode = crop_mode.lower().replace("-", "_")
+    if crop_mode not in {"full", "config"}:
+        raise ValueError("--crop-mode must be 'full' or 'config'.")
+    phase_mode = phase_mode.lower().strip()
+    if phase_mode not in {"random", "zero"}:
+        raise ValueError("--phase-mode must be 'random' or 'zero'.")
+    items = _dataset_items(
+        task=task,
+        data_path=data_path,
+        data_format=data_format,
+        split=split,
+        limit=limit,
+        offset=offset,
+        selection=selection,
+        selection_seed=selection_seed,
+        crop_mode=crop_mode,
+    )
+    extractor = _build_stftpr_extractor()
+    per_file = []
+    for item in items:
+        clean, clean_sr = _load_mono(item["clean_path"])
+        if item["target_num_samples"] > 0:
+            clean = _center_crop_or_pad(clean, item["target_num_samples"])
+        # deterministic per-file phase so subsampling variance is only from
+        # which files are selected, not from the phase realization
+        degraded = _phase_retrieval_degrade(
+            clean,
+            extractor,
+            phase_mode=phase_mode,
+            seed=phase_seed + int(item["index"]),
+        )
+        clean, degraded = _align_pair(clean, degraded)
+        row = {
+            "index": item["index"],
+            "clean_path": item["clean_path"],
+            "sample_rate": clean_sr,
+            "duration_s": float(clean.shape[-1] / clean_sr),
+            **_score_aligned_pair(clean, degraded, clean_sr),
+        }
+        per_file.append(row)
+
+    metric_names = ("pesq", "estoi", "si_sdr", "lsd", "psnr")
+    summary = {
+        "source": "dataset_phaseless",
+        "target": "degraded",
+        "phase_mode": phase_mode,
+        "phase_seed": phase_seed,
+        "task": task,
+        "data_path": data_path,
+        "data_format": data_format or _default_data_format(task),
+        "split": split,
+        "crop_mode": crop_mode,
+        "selection": selection,
+        "selection_seed": selection_seed,
+        "offset": offset,
+        "limit": limit,
+        "num_files": len(per_file),
+        "degraded": {name: _mean([row.get(name) for row in per_file]) for name in metric_names},
+    }
+    if include_stats:
+        summary["degraded_stats"] = {
+            name: _stats([row.get(name) for row in per_file])
+            for name in metric_names
+        }
+    if include_per_file:
+        summary["per_file"] = per_file
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    if output_json is not None:
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    return summary
+
+
 def score_manifest(
     manifest_path: Path,
     *,
