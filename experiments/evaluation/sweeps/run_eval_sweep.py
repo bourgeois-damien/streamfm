@@ -8,11 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from experiments.benchmarks.sweep_grid import load_sweep_metadata, load_sweep_trials
+from experiments.benchmarks.sweeps.sweep_grid import load_sweep_metadata, load_sweep_trials
 from experiments.evaluation.results import DEFAULT_EVAL_WANDB_PROJECT
 
 
@@ -37,6 +37,7 @@ VALUE_FLAGS = {
     "selection_seed": "--selection-seed",
     "seed": "--seed",
     "dtype": "--dtype",
+    "matmul_precision": "--matmul-precision",
     "crop_mode": "--crop-mode",
     "memory_format": "--memory-format",
     "num_threads": "--num-threads",
@@ -154,8 +155,14 @@ def run_eval_sweep(
     dry_run: bool = False,
     resume: bool = False,
     continue_on_trial_error: bool = False,
+    workers: int = 1,
 ) -> tuple[int, int]:
-    """Run a filtered evaluation grid sequentially from the local orchestrator."""
+    """Run a filtered evaluation grid from the local orchestrator.
+
+    With ``workers > 1`` trials run concurrently (each spawns its own backend
+    job, e.g. one Modal GPU container), so ``workers`` bounds how many GPUs run
+    at once. ``workers == 1`` preserves the original sequential behaviour.
+    """
     trials = load_eval_sweep_trials(sweep_yaml)
     if not trials:
         raise ValueError("Evaluation sweep produced zero trials after exclusions.")
@@ -167,18 +174,16 @@ def run_eval_sweep(
     project = str(metadata.get("project") or DEFAULT_EVAL_WANDB_PROJECT)
     entity = str(metadata.get("entity") or "")
     local_log_root = Path(str(payload.get("local_log_dir") or REPO_ROOT / "outputs" / "evaluation_logs"))
+    total = len(trials)
 
-    completed = 0
-    failed = 0
-    for index, trial in enumerate(trials, start=1):
+    def _run_one(index: int, trial: dict[str, Any]) -> str:
         trial.setdefault("local_log_dir", str(local_log_root))
         variant = _safe_label(str(trial.get("variant", "baseline")))
         run_name = f"{sweep_group}-{index:03d}-{variant}"
         metrics_path = local_log_root / run_name / "metrics_all.json"
         if resume and metrics_path.exists():
-            print(f"[{index}/{len(trials)}] Skip completed trial: {run_name}", flush=True)
-            completed += 1
-            continue
+            print(f"[{index}/{total}] Skip completed trial: {run_name}", flush=True)
+            return "skipped"
 
         command = build_eval_trial_command(
             trial,
@@ -187,21 +192,49 @@ def run_eval_sweep(
             default_entity=entity,
             default_group=sweep_group,
         )
-        print(f"[{index}/{len(trials)}] {shlex.join(command)}", flush=True)
+        print(f"[{index}/{total}] {shlex.join(command)}", flush=True)
         if dry_run:
-            continue
+            return "dry"
         try:
             subprocess.run(command, check=True, cwd=REPO_ROOT)
-            completed += 1
+            print(f"[{index}/{total}] Completed: {run_name}", flush=True)
+            return "completed"
         except subprocess.CalledProcessError:
-            failed += 1
-            if not continue_on_trial_error:
-                raise
+            print(f"[{index}/{total}] FAILED: {run_name}", flush=True)
+            return "failed"
+
+    completed = 0
+    failed = 0
+    if dry_run or workers <= 1:
+        for index, trial in enumerate(trials, start=1):
+            status = _run_one(index, trial)
+            if status == "completed" or status == "skipped":
+                completed += 1
+            elif status == "failed":
+                failed += 1
+                if not continue_on_trial_error:
+                    raise subprocess.CalledProcessError(1, "streamfm_eval")
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_run_one, index, trial): index
+                for index, trial in enumerate(trials, start=1)
+            }
+            for future in as_completed(futures):
+                status = future.result()
+                if status in ("completed", "skipped"):
+                    completed += 1
+                elif status == "failed":
+                    failed += 1
 
     if dry_run:
-        print(f"Would run {len(trials)} evaluation trial(s) in group '{sweep_group}'.")
+        print(f"Would run {total} evaluation trial(s) in group '{sweep_group}'.")
     else:
         print(f"Evaluation sweep finished: {completed} completed, {failed} failed.")
+        if failed and not continue_on_trial_error and workers > 1:
+            raise subprocess.CalledProcessError(1, "streamfm_eval")
     return completed, failed
 
 
@@ -209,11 +242,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run a filtered Stream.FM evaluation grid locally or on Modal, with scoring and W&B logging.",
     )
-    parser.add_argument("--sweep-yaml", default="experiments/evaluation/sweep.yaml")
+    parser.add_argument("--sweep-yaml", default="experiments/evaluation/sweeps/configs/sweep.yaml")
     parser.add_argument("--group", default="", help="Stable run/group prefix; useful together with --resume.")
     parser.add_argument("--dry-run", action="store_true", help="Print every trial without launching it.")
     parser.add_argument("--resume", action="store_true", help="Skip trials whose metrics_all.json already exists.")
     parser.add_argument("--continue-on-trial-error", action="store_true")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Run this many trials concurrently (each spawns its own backend/GPU job). 1 = sequential.",
+    )
     args = parser.parse_args()
     run_eval_sweep(
         sweep_yaml=args.sweep_yaml,
@@ -221,6 +260,7 @@ def main() -> None:
         dry_run=args.dry_run,
         resume=args.resume,
         continue_on_trial_error=args.continue_on_trial_error,
+        workers=args.workers,
     )
 
 

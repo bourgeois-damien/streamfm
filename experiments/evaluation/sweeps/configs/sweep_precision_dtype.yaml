@@ -7,8 +7,8 @@
 # No presets: config/ckpt resolve from the task defaults (se_predgen / stftpr).
 #
 # Launch (4 L4 GPUs in parallel):
-#   .venv/bin/python experiments/evaluation/run_eval_sweep.py \
-#     --sweep-yaml experiments/evaluation/sweep_precision_dtype.yaml \
+#   .venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+#     --sweep-yaml experiments/evaluation/sweeps/configs/sweep_precision_dtype.yaml \
 #     --group precision-dtype-v1 --workers 4 --resume
 
 name: streamfm-eval-precision-dtype

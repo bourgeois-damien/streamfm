@@ -1,13 +1,15 @@
-# Sweep batch: Modal L4, steps=1
+# Sweep batch: Modal CPU, steps=1
+# Mêmes axes que L4, sans cuda_graph (non supporté sur CPU).
 # Grille: execution × dtype × memory_format × preallocate
-# = 3 × 3 × 2 × 2 = 36, moins 6 combos cuda_graph+preallocate → 30 runs.
+# = 2 × 3 × 2 × 2 = 24 runs.
 #
-# Lancer:
-#   python experiments/benchmarks/run_benchmark_sweep_batch.py \
-#     --sweep-yaml experiments/benchmarks/sweep_l4_steps1.yaml \
-#     --wandb-group l4-steps1-batch
+# Lancer (ex. 8 containers CPU en parallèle) :
+#   python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_modal_cpu_steps1.yaml \
+#     --wandb-group modal-cpu-steps1-batch \
+#     --workers 8
 #
-program: experiments/benchmarks/run_benchmark_sweep.py
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
 project: streamfm-benchmark-sweeps
 entity: damien-brgs92-heriot-watt-university
 method: grid
@@ -24,7 +26,6 @@ parameters:
     values:
       - eager
       - compiled
-      - cuda_graph
   steps:
     value: 1
   dtype:
@@ -44,10 +45,9 @@ parameters:
     value: 100
   warmup:
     value: 20
+  num_threads:
+    value: 1
+  num_interop_threads:
+    value: 1
   hardware:
-    value: L4
-
-# preallocate n'a aucun effet sur le chemin cuda_graph → combos redondantes
-exclude:
-  - execution: cuda_graph
-    preallocate_model_buffers: true
+    value: CPU

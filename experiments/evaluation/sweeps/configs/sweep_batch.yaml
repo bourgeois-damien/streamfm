@@ -1,13 +1,13 @@
 # Evaluation batch : grille de combinaisons.
 #
 # Vérifier le nombre et le contenu des runs :
-#   .venv/bin/python experiments/evaluation/run_eval_sweep.py \
-#     --sweep-yaml experiments/evaluation/sweep_batch.yaml \
+#   .venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+#     --sweep-yaml experiments/evaluation/sweeps/configs/sweep_batch.yaml \
 #     --dry-run
 #
 # Lancer/reprendre la grille :
-#   .venv/bin/python experiments/evaluation/run_eval_sweep.py \
-#     --sweep-yaml experiments/evaluation/sweep_batch.yaml \
+#   .venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+#     --sweep-yaml experiments/evaluation/sweeps/configs/sweep_batch.yaml \
 #     --group eval-grid-v1 \
 #     --resume
 
@@ -26,7 +26,7 @@ parameters:
   split:
     value: test
   limit:
-    value: 20
+    value: 100
   selection:
     value: random
   selection_seed:

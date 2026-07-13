@@ -4,12 +4,12 @@
 #
 # Force hardware=cpu (pas mps) pour comparer au Modal CPU.
 #
-# Lancer:
-#   python experiments/benchmarks/run_benchmark_sweep_batch.py \
-#     --sweep-yaml experiments/benchmarks/sweep_local_cpu_steps1.yaml \
-#     --wandb-group local-cpu-steps1-batch
+# Lancer (grille complète, threads 1/1 — comparable au sweep Modal CPU 1/1) :
+#   python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_local_cpu_steps1.yaml \
+#     --wandb-group local-cpu-steps1-thread1_1-batch
 #
-program: experiments/benchmarks/run_benchmark_sweep.py
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
 project: streamfm-benchmark-sweeps
 entity: damien-brgs92-heriot-watt-university
 method: grid
@@ -45,5 +45,9 @@ parameters:
     value: 100
   warmup:
     value: 20
+  num_threads:
+    value: 1
+  num_interop_threads:
+    value: 1
   hardware:
     value: cpu

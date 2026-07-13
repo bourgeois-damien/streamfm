@@ -8,19 +8,19 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.benchmarks.results import DEFAULT_SWEEP_WANDB_PROJECT, record_benchmark_results
-from experiments.benchmarks.run_benchmark_sweep import (
+from experiments.benchmarks.sweeps.run_benchmark_sweep import (
     _run_benchmark_local,
     build_sweep_command,
     log_sweep_results_to_run,
     normalize_modal_hardware,
     resolve_sweep_iterations,
 )
-from experiments.benchmarks.sweep_grid import (
+from experiments.benchmarks.sweeps.sweep_grid import (
     expand_parameter_grid,
     load_sweep_metadata,
     load_sweep_parameters,
@@ -374,7 +374,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run an entire sweep grid locally or on Modal and log each trial to W&B.",
     )
-    parser.add_argument("--sweep-yaml", default="experiments/benchmarks/sweep_l4_steps1.yaml")
+    parser.add_argument("--sweep-yaml", default="experiments/benchmarks/sweeps/configs/sweep_l4_steps1.yaml")
     parser.add_argument("--wandb-project", default="")
     parser.add_argument("--wandb-entity", default="")
     parser.add_argument("--wandb-group", default="", help="Optional W&B group for all batch runs.")

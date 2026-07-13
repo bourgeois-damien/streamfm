@@ -251,21 +251,21 @@ Les métriques calculées sont généralement : SI-SDR, ESTOI, LSD, PSNR, PESQ, 
 
 ### 4. Lancer une grille d'évaluations avec métriques
 
-Le fichier `evaluation/sweep.yaml` décrit une grille locale avec les mêmes règles `exclude` que le sweep de benchmark. Le script est lancé depuis le Mac ; chaque essai peut néanmoins utiliser `backend: modal`. Il exécute l'inférence, le scoring, puis crée un run W&B par combinaison.
+Le fichier `evaluation/sweeps/configs/sweep.yaml` décrit une grille locale avec les mêmes règles `exclude` que le sweep de benchmark. Le script est lancé depuis le Mac ; chaque essai peut néanmoins utiliser `backend: modal`. Il exécute l'inférence, le scoring, puis crée un run W&B par combinaison.
 
 Toujours vérifier la grille avant de la lancer :
 
 ```bash
-.venv/bin/python experiments/evaluation/run_eval_sweep.py \
-  --sweep-yaml experiments/evaluation/sweep.yaml \
+.venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+  --sweep-yaml experiments/evaluation/sweeps/configs/sweep.yaml \
   --dry-run
 ```
 
 Puis lancer la grille avec un nom stable, qui permet aussi de reprendre les essais déjà scorés :
 
 ```bash
-.venv/bin/python experiments/evaluation/run_eval_sweep.py \
-  --sweep-yaml experiments/evaluation/sweep.yaml \
+.venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+  --sweep-yaml experiments/evaluation/sweeps/configs/sweep.yaml \
   --group quality-ablation-v1 \
   --resume
 ```

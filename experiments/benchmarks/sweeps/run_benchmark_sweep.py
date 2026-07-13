@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -106,10 +106,13 @@ def build_sweep_command(
         "warmup": int(sweep_config_get(config, "warmup", 10)),
         "audio_duration_s": float(sweep_config_get(config, "audio_duration_s", 0.0)),
         "model_dtype": str(sweep_config_get(config, "dtype", "fp32")),
+        "matmul_precision": str(sweep_config_get(config, "matmul_precision", "high")),
         "num_threads": int(sweep_config_get(config, "num_threads", 0)),
         "num_interop_threads": int(sweep_config_get(config, "num_interop_threads", 0)),
         "memory_format": str(sweep_config_get(config, "memory_format", "contiguous")),
         "preallocate_model_buffers": bool(sweep_config_get(config, "preallocate_model_buffers", False)),
+        "ptq_int8": str(sweep_config_get(config, "ptq_int8", "")),
+        "ptq_calib_steps": int(sweep_config_get(config, "ptq_calib_steps", 32)),
         "save_audio": bool(sweep_config_get(config, "save_audio", False)),
         "audio_output_dir": str(sweep_config_get(config, "audio_output_dir", "")),
         "input_audio": str(sweep_config_get(config, "input_audio", DEFAULT_INPUT_AUDIO)),
@@ -194,6 +197,7 @@ def _run_benchmark_local(command: dict[str, Any], *, input_audio_path: str) -> l
         iterations=int(command["iterations"]),
         warmup=int(command["warmup"]),
         model_dtype_name=str(command["model_dtype"]),
+        float32_matmul_precision=str(command["matmul_precision"]),
         device=device,
         paths=paths,
         backend="local",
@@ -207,6 +211,8 @@ def _run_benchmark_local(command: dict[str, Any], *, input_audio_path: str) -> l
         profile=bool(command["profile"]),
         profile_all=bool(command["profile_all"]),
         profile_file=str(command["profile_file"]),
+        ptq_int8=str(command.get("ptq_int8", "")),
+        ptq_calib_steps=int(command.get("ptq_calib_steps", 32)),
     )
 
 
@@ -235,6 +241,8 @@ def _run_benchmark_modal(command: dict[str, Any], *, input_audio_path: str, outp
         str(command["warmup"]),
         "--dtype",
         str(command["model_dtype"]),
+        "--matmul-precision",
+        str(command["matmul_precision"]),
         "--audio-duration-s",
         str(command["audio_duration_s"]),
         "--output-json",
@@ -248,6 +256,9 @@ def _run_benchmark_modal(command: dict[str, Any], *, input_audio_path: str, outp
         modal_command.extend(["--memory-format", str(command["memory_format"])])
     if bool(command["preallocate_model_buffers"]):
         modal_command.append("--preallocate-model-buffers")
+    if str(command.get("ptq_int8", "")):
+        modal_command.extend(["--ptq-int8", str(command["ptq_int8"])])
+        modal_command.extend(["--ptq-calib-steps", str(int(command.get("ptq_calib_steps", 32)))])
     if bool(command["save_audio"]):
         modal_command.append("--save-audio")
     if str(command["audio_output_dir"]):

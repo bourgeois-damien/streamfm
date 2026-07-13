@@ -1,10 +1,10 @@
 # Evaluation simple : exactement un run.
 #
 # Vérifier :
-#   .venv/bin/python experiments/evaluation/run_eval_sweep.py --dry-run
+#   .venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py --dry-run
 #
 # Lancer :
-#   .venv/bin/python experiments/evaluation/run_eval_sweep.py --group eval-simple-v1 --resume
+#   .venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py --group eval-simple-v1 --resume
 
 name: streamfm-eval-simple
 project: streamfm-evals
@@ -21,7 +21,7 @@ parameters:
   split:
     value: test
   limit:
-    value: 20
+    value: 100
   selection:
     value: random
   selection_seed:
