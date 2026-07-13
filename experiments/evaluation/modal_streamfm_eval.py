@@ -58,9 +58,15 @@ image = (
         "wandb==0.19.1",
     )
     .add_local_dir(str(LOCAL_ROOT / "config"), remote_path=f"{REMOTE_ROOT}/config")
-    .add_local_dir(str(LOCAL_ROOT / "experiments"), remote_path=f"{REMOTE_ROOT}/experiments")
+    # Exclude __pycache__/*.pyc: they are rewritten on first import and, if another
+    # sweep runs concurrently, Modal aborts the build ("modified during build process").
+    .add_local_dir(
+        str(LOCAL_ROOT / "experiments"),
+        remote_path=f"{REMOTE_ROOT}/experiments",
+        ignore=["**/__pycache__/**", "**/*.pyc"],
+    )
     .add_local_dir(str(LOCAL_ROOT / "flow_autoparams"), remote_path=f"{REMOTE_ROOT}/flow_autoparams")
-    .add_local_dir(str(LOCAL_ROOT / "sgmse"), remote_path=f"{REMOTE_ROOT}/sgmse")
+    .add_local_dir(str(LOCAL_ROOT / "sgmse"), remote_path=f"{REMOTE_ROOT}/sgmse", ignore=["**/__pycache__/**", "**/*.pyc"])
 )
 
 for checkpoint_name in (
@@ -77,6 +83,17 @@ for checkpoint_name in (
         image = image.add_local_file(
             str(local_checkpoint),
             remote_path=f"{REMOTE_ROOT}/checkpoints/{checkpoint_name}",
+        )
+
+# Compressed (decoupled-SVD) checkpoints live in checkpoints/compressed/. Upload
+# them flat into the remote checkpoints root so sweeps can reference them by base
+# name (e.g. ckpt: streamfm_stftpr_k6.ckpt) and the checkpoint-root search finds them.
+_compressed_dir = LOCAL_ROOT / "checkpoints" / "compressed"
+if _compressed_dir.is_dir():
+    for compressed_checkpoint in sorted(_compressed_dir.glob("*.ckpt")):
+        image = image.add_local_file(
+            str(compressed_checkpoint),
+            remote_path=f"{REMOTE_ROOT}/checkpoints/{compressed_checkpoint.name}",
         )
 
 

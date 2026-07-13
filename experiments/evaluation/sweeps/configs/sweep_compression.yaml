@@ -1,0 +1,127 @@
+# Evaluation sweep : perte de précision en fonction du rang de compression.
+#
+# Objectif : mesurer la dégradation des métriques (SI-SDR, eSTOI, LSD, PSNR, PESQ,
+# DistillMOS) du modèle STFTPR quand on compresse le backbone, vs le modèle complet.
+# On balaie le checkpoint : baseline non compressé + K=1..8.
+#
+# dtype = fp16 : plus rapide sans perte de précision notable pour STFTPR (la STFT
+# reste en pleine précision ; bf16 est incompatible avec le backbone complexe).
+#
+# Comparaison appariée : mêmes 100 fichiers de test pour chaque rang
+# (selection_seed fixe), donc les deltas par-fichier vs baseline sont directement
+# comparables et convergent vite (cf. testset-subset-convergence).
+#
+# 9 trials (baseline + K=1..8), backend Modal L4.
+#
+# Vérifier :
+#   .venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+#     --sweep-yaml experiments/evaluation/sweeps/configs/sweep_compression.yaml --dry-run
+#
+# Lancer (4 GPU L4 en parallèle, reprenable) :
+#   .venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+#     --sweep-yaml experiments/evaluation/sweeps/configs/sweep_compression.yaml \
+#     --group compression-precision-v1 --workers 4 --resume
+
+name: streamfm-eval-compression
+project: streamfm-evals
+entity: damien-brgs92-heriot-watt-university
+method: grid
+
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  split:
+    value: test
+  part:
+    value: model
+  pipeline:
+    value: offline
+  execution:
+    value: eager
+  memory_format:
+    value: contiguous
+  steps:
+    value: 1
+  dtype:
+    value: fp16
+  # Sous-ensemble apparié : mêmes fichiers pour tous les rangs.
+  limit:
+    value: 100
+  offset:
+    value: 0
+  selection:
+    value: random
+  selection_seed:
+    value: 42
+  seed:
+    value: 42
+  crop_mode:
+    value: full
+  # Les re-runs reutilisent le meme dossier de sortie ; overwrite evite FileExistsError.
+  overwrite:
+    value: true
+  score_after_run:
+    value: true
+  score_include_stats:
+    value: true
+  score_include_per_file:
+    value: true
+  score_with_distillmos:
+    value: true
+  wandb:
+    value: true
+  variant:
+    values:
+      - baseline
+      - k1
+      - k2
+      - k3
+      - k4
+      - k5
+      - k6
+      - k7
+      - k8
+
+presets:
+  baseline:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr.ckpt
+    config_overrides: []
+  k1:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k1.ckpt
+    config_overrides: []
+  k2:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k2.ckpt
+    config_overrides: []
+  k3:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k3.ckpt
+    config_overrides: []
+  k4:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k4.ckpt
+    config_overrides: []
+  k5:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k5.ckpt
+    config_overrides: []
+  k6:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k6.ckpt
+    config_overrides: []
+  k7:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k7.ckpt
+    config_overrides: []
+  k8:
+    config_name: streamfm_stftpr
+    ckpt: streamfm_stftpr_k8.ckpt
+    config_overrides: []
+
+exclude: []

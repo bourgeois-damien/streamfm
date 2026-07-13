@@ -1,0 +1,51 @@
+# Diagnostic multi-GPU : le surcout de decomposition (dense vs J=9) depend-il du GPU ?
+#
+# Sur L4 : dense 1.60 ms, k9 (decompose rang plein, sortie identique) 3.15 ms (+97%).
+# Le papier (RTX 4080 Laptop, Ada) semble ne PAS subir ce surcout (J=9 tient NFE=5
+# comme le modele dense). Test : L40S (Ada, proche du 4080) + A100 (Ampere, contraste).
+# Si sur L40S l'ecart dense-vs-k9 se reduit, le surcout est specifique au GPU/kernels.
+#
+# baseline (dense dnn_only) vs k6 vs k9, cuda_graph + channels_last + fp16, pipeline audio.
+# 2 GPU x 3 ckpt = 6 trials -> 2 containers (un par GPU).
+#
+# Lancer :
+#   .venv/bin/python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_multigpu_compression.yaml \
+#     --wandb-group multigpu-compression-v1
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    values:
+      - L40S
+      - A100
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: cuda_graph
+  dtype:
+    value: fp16
+  memory_format:
+    value: channels_last
+  steps:
+    value: 1
+  iterations:
+    value: 500
+  warmup:
+    value: 50
+  ckpt:
+    values:
+      - ""
+      - streamfm_stftpr_k6.ckpt
+      - streamfm_stftpr_k9.ckpt
+
+exclude: []

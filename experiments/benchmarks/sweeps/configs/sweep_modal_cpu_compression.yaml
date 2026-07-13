@@ -1,0 +1,63 @@
+# Benchmark sweep CPU : gain de vitesse vs rang de compression, regime compute-bound.
+#
+# Contrepoint du sweep L4 (sweep_l4_compression.yaml) : sur GPU la compression dec-SVD
+# RALENTIT (regime memoire/launch-bound, conv groupee inefficace). Sur CPU, borne par
+# le calcul, la baisse de FLOPs (~K/9 du dense) devrait au contraire accelerer les bas K.
+#
+# eager + fp32 + contiguous + 1 thread : isole le cout brut des ops (pas de compile,
+# pas de fp16 — non accelere sur CPU —, pas de parallelisme qui masquerait l'effet FLOPs).
+# pipeline audio : meme mesure bout-en-bout que le sweep L4.
+#
+# ckpt vide => backbone non compresse (streamfm_stftpr_dnn_only.pt). ckpt = kN => rang N.
+#
+# 9 trials, un container CPU Modal (warm), sequentiel.
+#
+# Lancer :
+#   .venv/bin/python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_modal_cpu_compression.yaml \
+#     --wandb-group cpu-compression-v1
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: CPU
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: eager
+  dtype:
+    value: fp32
+  memory_format:
+    value: contiguous
+  steps:
+    value: 1
+  iterations:
+    value: 100
+  warmup:
+    value: 20
+  num_threads:
+    value: 1
+  num_interop_threads:
+    value: 1
+  ckpt:
+    values:
+      - ""
+      - streamfm_stftpr_k1.ckpt
+      - streamfm_stftpr_k2.ckpt
+      - streamfm_stftpr_k3.ckpt
+      - streamfm_stftpr_k4.ckpt
+      - streamfm_stftpr_k5.ckpt
+      - streamfm_stftpr_k6.ckpt
+      - streamfm_stftpr_k7.ckpt
+      - streamfm_stftpr_k8.ckpt
+
+exclude: []

@@ -1,0 +1,67 @@
+# Benchmark sweep: gain de vitesse d'inférence en fonction du rang de compression.
+#
+# Objectif : mesurer la vitesse du backbone STFTPR sur GPU L4 avec la MEILLEURE
+# configuration trouvée (cf. outputs/benchmark_profiles/backbone_l4_best_configs.json) :
+#   execution = cuda_graph, memory_format = channels_last, dtype = fp16.
+# On balaie le checkpoint : baseline non compressé (dnn_only) + K=1..8.
+#
+# pipeline = audio : on mesure la vitesse de l'ensemble bout-en-bout (STFT + backbone
+# + iSTFT) en streaming, c'est le resultat realiste recherche. cuda_graph + audio
+# => chemin interne "audio_graph_model". La compression n'agit que sur le backbone,
+# donc le gain apparait dilue par la part fixe (STFT) du pipeline.
+#
+# ckpt vide => backbone non compressé de référence (streamfm_stftpr_dnn_only.pt).
+# ckpt = streamfm_stftpr_kN.ckpt => checkpoint compressé (uploadé à plat sur Modal).
+#
+# 9 trials, un seul container L4 (warm), sequentiel.
+#
+# Lancer :
+#   .venv/bin/python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_l4_compression.yaml \
+#     --wandb-group l4-compression-v1
+#
+# Vérifier le plan sans lancer de compute :
+#   .venv/bin/python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_l4_compression.yaml --dry-run
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: cuda_graph
+  dtype:
+    value: fp16
+  memory_format:
+    value: channels_last
+  steps:
+    value: 1
+  iterations:
+    value: 500
+  warmup:
+    value: 50
+  # Baseline non compressé (ckpt vide) + rangs K=1..8.
+  ckpt:
+    values:
+      - ""
+      - streamfm_stftpr_k1.ckpt
+      - streamfm_stftpr_k2.ckpt
+      - streamfm_stftpr_k3.ckpt
+      - streamfm_stftpr_k4.ckpt
+      - streamfm_stftpr_k5.ckpt
+      - streamfm_stftpr_k6.ckpt
+      - streamfm_stftpr_k7.ckpt
+      - streamfm_stftpr_k8.ckpt
+
+exclude: []

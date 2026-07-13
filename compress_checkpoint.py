@@ -20,6 +20,21 @@ def _instantiate_model(cfg):
     return instantiate(cfg.model)
 
 
+def _instantiate_backbone(cfg, dotted_path: str):
+    """Instantiate the configured streaming backbone without importing Lightning.
+
+    Compression only changes the ``dnn`` backbone.  Building the full model pulls
+    in the training stack (including optional text-model dependencies), although
+    none of it is needed to rewrite inference weights.
+    """
+    if dotted_path not in {"dnn", "wrapped_model.dnn"}:
+        raise ValueError(
+            "Backbone-only checkpoint compression currently supports 'dnn' "
+            f"or 'wrapped_model.dnn', got {dotted_path!r}."
+        )
+    return instantiate(cfg.model.backbone)
+
+
 def _resolve_module(root, dotted_path: str):
     current = root
     for part in dotted_path.split("."):
@@ -27,6 +42,14 @@ def _resolve_module(root, dotted_path: str):
             raise AttributeError(f"Model has no module at '{dotted_path}' (missing '{part}').")
         current = getattr(current, part)
     return current
+
+
+def _state_dict_prefix(state_dict: dict, dotted_path: str) -> str:
+    """Find the state-dict prefix used for a configured backbone path."""
+    for prefix in (dotted_path, f"model.{dotted_path}"):
+        if any(key.startswith(f"{prefix}.") for key in state_dict):
+            return prefix
+    raise KeyError(f"Checkpoint has no weights under '{dotted_path}.' or 'model.{dotted_path}.'.")
 
 
 def compress_checkpoint(
@@ -52,19 +75,34 @@ def compress_checkpoint(
 
     with initialize_config_dir(config_dir=str(config_path), version_base="1.3"):
         cfg = compose(config_name=config_name)
-    model = _instantiate_model(cfg)
-    source = torch.load(source_path, map_location="cpu", weights_only=False)
+    # Full training checkpoints also include optimizer state.  Memory-map their
+    # tensor storages so a compression sweep does not need to materialize all of
+    # that state in RAM before selecting the model weights.
+    source = torch.load(source_path, map_location="cpu", weights_only=False, mmap=True)
     if not isinstance(source, dict) or "state_dict" not in source:
         raise ValueError("Source must be a full checkpoint containing a 'state_dict'.")
-    model.load_state_dict(source["state_dict"], strict=True)
-
     paths = tuple(backbone_paths)
+    source_state = source["state_dict"]
+    compressed_state = dict(source_state)
+    parameter_count = 0
     for path in paths:
-        compress_decoupled_(_resolve_module(model, path), rank)
+        prefix = _state_dict_prefix(source_state, path)
+        backbone = _instantiate_backbone(cfg, path)
+        backbone_state = {
+            key[len(prefix) + 1 :]: value
+            for key, value in source_state.items()
+            if key.startswith(f"{prefix}.")
+        }
+        backbone.load_state_dict(backbone_state, strict=True)
+        compress_decoupled_(backbone, rank)
+        for key in backbone_state:
+            compressed_state.pop(f"{prefix}.{key}")
+        compressed_state.update({f"{prefix}.{key}": value for key, value in backbone.state_dict().items()})
+        parameter_count += sum(parameter.numel() for parameter in backbone.parameters())
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output = {
-        "state_dict": model.state_dict(),
+        "state_dict": compressed_state,
         COMPRESSION_METADATA_KEY: make_decoupled_svd_metadata(rank=rank, backbone_paths=list(paths)),
         "source_checkpoint": str(source_path),
     }
@@ -73,7 +111,7 @@ def compress_checkpoint(
         "output_checkpoint": str(output_path),
         "rank": rank,
         "backbone_paths": list(paths),
-        "parameters": sum(parameter.numel() for parameter in model.parameters()),
+        "parameters": parameter_count,
     }
 
 

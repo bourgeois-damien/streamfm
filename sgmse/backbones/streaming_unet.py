@@ -1,4 +1,5 @@
 from typing import Optional, List, Tuple, Mapping, Sequence, Callable
+import os
 import warnings
 
 import abc
@@ -10,9 +11,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-# increase torch dynamo compile limit
-import torch._dynamo
-torch._dynamo.config.cache_size_limit  = 64
+# Increase the torch.compile cache limit for inference/training.  Checkpoint
+# conversion does not compile models, and can skip this expensive import.
+if not os.environ.get("STREAMFM_SKIP_DYNAMO_CONFIG"):
+    import torch._dynamo
+
+    torch._dynamo.config.cache_size_limit = 64
 
 from .unet_utils.layerspp import GaussianFourierProjection, Combine, get_act
 from .unet_utils.layerspp import AttnBlockpp, NIN  # only for ablation studies
