@@ -32,6 +32,9 @@ listen/
 enhanced/
 checkpoints/
 
+# generated research paper artifacts (large PDF + exported text)
+research_paper/
+
 # eshell files
 /eshell/history
 /eshell/lastdir
