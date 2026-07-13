@@ -16,6 +16,7 @@ from experiments.common import (
     apply_model_memory_format,
     device_label,
     ensure_repo_importable,
+    normalize_float32_matmul_precision,
     normalize_model_memory_format,
 )
 from experiments.evaluation.options import (
@@ -210,6 +211,7 @@ def run_test_set_inference(
     num_interop_threads: int = 0,
     cache_info: dict | None = None,
     config_overrides: list[str] | tuple[str, ...] = (),
+    float32_matmul_precision: str = "high",
 ) -> dict:
     """Run official offline inference on a configured dataset split."""
     import torch
@@ -241,6 +243,7 @@ def run_test_set_inference(
             "torch.view_as_complex, which has no bfloat16 kernel. Use 'fp16' or 'fp32'."
         )
     model_memory_format = normalize_model_memory_format(model_memory_format)
+    float32_matmul_precision = normalize_float32_matmul_precision(float32_matmul_precision)
     crop_mode = crop_mode.lower().replace("-", "_")
     if crop_mode not in {"config", "full"}:
         raise ValueError("--crop-mode must be 'config' or 'full'.")
@@ -252,7 +255,7 @@ def run_test_set_inference(
 
     os.chdir(paths.repo_root)
     ensure_repo_importable(paths.repo_root)
-    torch.set_float32_matmul_precision("high")
+    torch.set_float32_matmul_precision(float32_matmul_precision)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
@@ -410,6 +413,7 @@ def run_test_set_inference(
         "solver": solver,
         "steps": steps,
         "model_dtype": model_dtype_name.lower(),
+        "float32_matmul_precision": float32_matmul_precision,
         "model_memory_format": model_memory_format,
         "crop_mode": crop_mode,
         "seed": seed,
@@ -448,6 +452,7 @@ def run_test_set_inference(
         "solver": solver,
         "steps": steps,
         "model_dtype": model_dtype_name.lower(),
+        "float32_matmul_precision": float32_matmul_precision,
         "model_memory_format": model_memory_format,
         "crop_mode": crop_mode,
         "seed": seed,

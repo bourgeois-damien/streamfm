@@ -4,7 +4,12 @@ import json
 import os
 import time
 
-from experiments.common import apply_model_memory_format, device_label, normalize_model_memory_format
+from experiments.common import (
+    apply_model_memory_format,
+    device_label,
+    normalize_float32_matmul_precision,
+    normalize_model_memory_format,
+)
 from experiments.benchmarks.cuda_graph import (
     benchmark_flow_steps_cuda_graph,
     benchmark_se_flow_cuda_graph,
@@ -561,6 +566,7 @@ def run_benchmark(
     requested_execution = execution.lower().replace("-", "_")
     execution = resolve_execution(execution, device)
     model_memory_format = normalize_model_memory_format(model_memory_format)
+    float32_matmul_precision = normalize_float32_matmul_precision(float32_matmul_precision)
 
     if execution == "cuda_graph" and device.type != "cuda":
         raise ValueError("execution=cuda_graph requires a CUDA device.")
@@ -568,10 +574,21 @@ def run_benchmark(
     started_at = time.perf_counter()
     os.chdir(paths.repo_root)
     torch.set_float32_matmul_precision(float32_matmul_precision)
-    if device.type == "cpu" and num_threads > 0:
-        torch.set_num_threads(num_threads)
-    if device.type == "cpu" and num_interop_threads > 0:
-        torch.set_num_interop_threads(num_interop_threads)
+    if device.type == "cpu":
+        # Interop threads can only be set once per process, and only before parallel work.
+        # Batch sweeps reuse the same Modal/local process across trials, so ignore repeat sets.
+        if num_interop_threads > 0:
+            try:
+                torch.set_num_interop_threads(num_interop_threads)
+            except RuntimeError as exc:
+                current = torch.get_num_interop_threads()
+                if current != num_interop_threads:
+                    print(
+                        f"Warning: could not set interop threads to {num_interop_threads} "
+                        f"(current={current}): {exc}"
+                    )
+        if num_threads > 0:
+            torch.set_num_threads(num_threads)
 
     resolved = normalize_cli_options(
         task=task,
@@ -639,6 +656,7 @@ def run_benchmark(
         row["benchmark_s"] = benchmark_s
         row["total_s"] = total_s
         row["requested_model_dtype"] = model_dtype_name.lower()
+        row["float32_matmul_precision"] = float32_matmul_precision
         row["requested_task"] = resolved["requested_task"]
         row["requested_part"] = resolved["requested_part"]
         row["requested_pipeline"] = resolved["requested_pipeline"]

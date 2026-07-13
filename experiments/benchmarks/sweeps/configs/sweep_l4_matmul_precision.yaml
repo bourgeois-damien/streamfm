@@ -1,0 +1,51 @@
+# Sweep benchmark dédié matmul precision (float32).
+#
+# Objectif: comparer torch.set_float32_matmul_precision sur
+# {highest, high, medium} à config fixe:
+#   - backend: modal
+#   - hardware: L4
+#   - task: stftpr
+#   - part/pipeline: model + audio
+#   - execution: cuda_graph
+#   - dtype: fp32
+#   - memory_format: channels_last
+#
+# Lancer:
+#   .venv/bin/python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_l4_matmul_precision.yaml \
+#     --wandb-group l4-matmul-precision-fp32-v1
+#
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: cuda_graph
+  steps:
+    value: 1
+  dtype:
+    value: fp32
+  memory_format:
+    value: channels_last
+  matmul_precision:
+    values:
+      - highest
+      - high
+      - medium
+  iterations:
+    value: 500
+  warmup:
+    value: 50
+
+exclude: []

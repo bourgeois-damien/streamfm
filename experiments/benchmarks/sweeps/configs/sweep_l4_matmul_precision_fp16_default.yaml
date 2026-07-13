@@ -1,0 +1,49 @@
+# Sweep benchmark matmul precision en fp16 avec iterations/warmup par défaut.
+#
+# Config fixe:
+#   - backend: modal
+#   - hardware: L4
+#   - task: stftpr
+#   - part/pipeline: model + audio
+#   - execution: cuda_graph
+#   - dtype: fp16
+#   - memory_format: channels_last
+# Paramètre balayé:
+#   - matmul_precision: highest, high, medium
+#
+# iterations/warmup fixés aux defaults (100/10). Le runner batch attend des clés explicites.
+#
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: cuda_graph
+  steps:
+    value: 1
+  dtype:
+    value: fp16
+  memory_format:
+    value: channels_last
+  matmul_precision:
+    values:
+      - highest
+      - high
+      - medium
+  iterations:
+    value: 100
+  warmup:
+    value: 10
+
+exclude: []

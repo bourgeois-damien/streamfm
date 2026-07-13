@@ -1,0 +1,79 @@
+# Sweep eval dédié matmul precision (float32).
+#
+# Objectif: comparer torch.set_float32_matmul_precision sur
+# {highest, high, medium} à config fixe:
+#   - backend: modal
+#   - hardware: L4
+#   - task: stftpr
+#   - execution: compiled (cuda_graph n'est pas supporté en eval offline)
+#   - dtype: fp32
+#   - memory_format: channels_last
+#
+# Vérifier:
+#   .venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+#     --sweep-yaml experiments/evaluation/sweeps/configs/sweep_matmul_precision_fp32.yaml \
+#     --dry-run
+#
+# Lancer:
+#   .venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+#     --sweep-yaml experiments/evaluation/sweeps/configs/sweep_matmul_precision_fp32.yaml \
+#     --group eval-matmul-precision-fp32-v1 --workers 3 --resume
+#
+name: streamfm-eval-matmul-precision-fp32
+project: streamfm-evals
+entity: damien-brgs92-heriot-watt-university
+method: grid
+
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  split:
+    value: test
+  part:
+    value: model
+  pipeline:
+    value: offline
+  execution:
+    value: compiled
+  steps:
+    value: 1
+  dtype:
+    value: fp32
+  matmul_precision:
+    values:
+      - highest
+      - high
+      - medium
+  memory_format:
+    value: channels_last
+  overwrite:
+    value: true
+  limit:
+    value: 100
+  offset:
+    value: 0
+  selection:
+    value: random
+  selection_seed:
+    value: 42
+  seed:
+    value: 42
+  crop_mode:
+    value: full
+  score_after_run:
+    value: true
+  score_include_stats:
+    value: true
+  score_include_per_file:
+    value: true
+  score_with_distillmos:
+    value: true
+  wandb:
+    value: true
+
+presets: {}
+exclude: []

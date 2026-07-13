@@ -146,6 +146,12 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--audio-duration-s", type=float, default=0.0, help="If >0 with --pipeline audio, override --iterations and process this duration.")
     parser.add_argument("--dtype", default="fp32", choices=("fp32", "fp16", "bf16"))
+    parser.add_argument(
+        "--matmul-precision",
+        default="high",
+        choices=("highest", "high", "medium"),
+        help="torch.set_float32_matmul_precision mode used for float32 matmul kernels.",
+    )
     parser.add_argument("--ckpt", default="", help="Optional full checkpoint; compressed checkpoints are detected automatically.")
     parser.add_argument("--num-threads", type=int, default=0, help="CPU only. 0 leaves PyTorch default unchanged.")
     parser.add_argument("--num-interop-threads", type=int, default=0, help="CPU only. 0 leaves PyTorch default unchanged.")
@@ -221,6 +227,7 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
         iterations=args.iterations,
         warmup=args.warmup,
         model_dtype_name=args.dtype,
+        float32_matmul_precision=args.matmul_precision,
         device=device,
         paths=paths,
         backend="local",
@@ -259,6 +266,7 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
             "warmup": args.warmup,
             "audio_duration_s": args.audio_duration_s,
             "model_dtype": args.dtype,
+            "matmul_precision": args.matmul_precision,
             "ckpt": args.ckpt,
             "num_threads": args.num_threads,
             "num_interop_threads": args.num_interop_threads,
@@ -304,6 +312,8 @@ def _run_modal(args: argparse.Namespace, hardware: str) -> None:
         str(args.warmup),
         "--dtype",
         args.dtype,
+        "--matmul-precision",
+        args.matmul_precision,
     ]
     command.extend(["--audio-duration-s", str(args.audio_duration_s)])
     if args.ckpt:

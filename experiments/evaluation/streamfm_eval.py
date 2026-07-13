@@ -131,6 +131,12 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dtype", default="fp32", choices=("fp32", "fp16", "bf16"))
     parser.add_argument(
+        "--matmul-precision",
+        default="high",
+        choices=("highest", "high", "medium"),
+        help="torch.set_float32_matmul_precision mode used for float32 matmul kernels.",
+    )
+    parser.add_argument(
         "--crop-mode",
         default="full",
         choices=("config", "full"),
@@ -201,6 +207,7 @@ def _run_local(args: argparse.Namespace, hardware: str) -> tuple[dict, str, str]
         selection_seed=args.selection_seed,
         seed=args.seed,
         model_dtype_name=args.dtype,
+        float32_matmul_precision=args.matmul_precision,
         model_memory_format=args.memory_format,
         crop_mode=args.crop_mode,
         device=device,
@@ -260,6 +267,7 @@ def _command_dict(args: argparse.Namespace, *, backend: str, hardware: str) -> d
         "selection_seed": args.selection_seed,
         "seed": args.seed,
         "dtype": args.dtype,
+        "matmul_precision": args.matmul_precision,
         "crop_mode": args.crop_mode,
         "memory_format": args.memory_format,
         "num_threads": args.num_threads,
@@ -329,6 +337,8 @@ def _run_modal(args: argparse.Namespace, hardware: str) -> tuple[dict, str, str]
         str(args.seed),
         "--dtype",
         args.dtype,
+        "--matmul-precision",
+        args.matmul_precision,
         "--crop-mode",
         args.crop_mode,
         "--memory-format",
