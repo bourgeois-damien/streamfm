@@ -11,7 +11,6 @@ def _safe_cache_label(label: str) -> str:
 
 
 def configure_shared_modal_cache(*, volume_root: str, hardware: str) -> dict[str, str]:
-    """Share content-addressed compiler caches between experiment combinations."""
     hardware_label = _safe_cache_label(hardware.upper())
     shared_root = f"{volume_root}/cache/shared/{CACHE_LAYOUT_VERSION}"
     cache_root = f"{shared_root}/{hardware_label}"
@@ -20,6 +19,7 @@ def configure_shared_modal_cache(*, volume_root: str, hardware: str) -> dict[str
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"{cache_root}/torchinductor"
     os.environ["TRITON_CACHE_DIR"] = f"{cache_root}/triton"
     os.environ["XDG_CACHE_HOME"] = f"{cache_root}/xdg"
+    os.environ["STREAMFM_TRT_ENGINE_CACHE_DIR"] = f"{volume_root}/tensorrt_engines"
     for path in (
         cache_root,
         os.environ["TORCH_HOME"],
@@ -27,6 +27,7 @@ def configure_shared_modal_cache(*, volume_root: str, hardware: str) -> dict[str
         os.environ["TRITON_CACHE_DIR"],
         os.environ["XDG_CACHE_HOME"],
         f"{os.environ['XDG_CACHE_HOME']}/torch/kernels",
+        os.environ["STREAMFM_TRT_ENGINE_CACHE_DIR"],
     ):
         os.makedirs(path, exist_ok=True)
 
@@ -37,4 +38,5 @@ def configure_shared_modal_cache(*, volume_root: str, hardware: str) -> dict[str
         "torchinductor_cache_dir": os.environ["TORCHINDUCTOR_CACHE_DIR"],
         "triton_cache_dir": os.environ["TRITON_CACHE_DIR"],
         "xdg_cache_home": os.environ["XDG_CACHE_HOME"],
+        "trt_engine_cache_dir": os.environ["STREAMFM_TRT_ENGINE_CACHE_DIR"],
     }

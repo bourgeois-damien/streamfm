@@ -11,7 +11,6 @@ def normalize_cli_options(
     pipeline: str,
     execution: str,
 ) -> dict:
-    """Map explicit CLI options to internal benchmark names."""
     requested_task = task.lower().replace("-", "_")
     requested_part = part.lower().replace("-", "_")
     requested_pipeline = pipeline.lower().replace("-", "_")
@@ -24,8 +23,10 @@ def normalize_cli_options(
         raise ValueError("Unsupported part. Use 'model', 'predictor', or 'flow'.")
     if requested_pipeline not in {"model_only", "audio"}:
         raise ValueError("Unsupported pipeline. Use 'model_only' or 'audio'.")
-    if requested_execution not in {"eager", "compiled", "cuda_graph", "tensorrt", "tensorrt_int8"}:
-        raise ValueError("Unsupported execution. Use eager, compiled, cuda_graph, tensorrt, or tensorrt_int8.")
+    if requested_execution not in {"eager", "compiled", "cuda_graph", "cuda_graph_full", "tensorrt", "tensorrt_cuda_graph"}:
+        raise ValueError(
+            "bad --execution (eager|compiled|cuda_graph|cuda_graph_full|tensorrt|tensorrt_cuda_graph)."
+        )
 
     if requested_task in FLOW_TASKS:
         if requested_part == "predictor":
@@ -38,12 +39,23 @@ def normalize_cli_options(
     else:
         internal_task = "se_full"
 
+    if requested_execution == "cuda_graph_full":
+        if requested_pipeline != "audio":
+            raise ValueError("cuda_graph_full needs --pipeline audio.")
+        if requested_task == "se":
+            raise ValueError("cuda_graph_full not implemented for SE.")
+
     if requested_pipeline == "model_only":
         internal_pipeline = "graph_model" if requested_execution == "cuda_graph" else "model"
     else:
         if requested_task == "se" and requested_part != "model":
-            raise ValueError("SE audio pipeline supports only '--part model'. Use '--pipeline model_only' for predictor/flow.")
-        internal_pipeline = "audio_graph_model" if requested_execution == "cuda_graph" else "audio"
+            raise ValueError("SE audio needs --part model (else --pipeline model_only).")
+        if requested_execution == "cuda_graph_full":
+            internal_pipeline = "audio_full_graph"
+        elif requested_execution == "cuda_graph":
+            internal_pipeline = "audio_graph_model"
+        else:
+            internal_pipeline = "audio"
 
     return {
         "requested_task": requested_task,
@@ -52,14 +64,13 @@ def normalize_cli_options(
         "execution": requested_execution,
         "internal_task": internal_task,
         "internal_pipeline": internal_pipeline,
-        "use_compiled": requested_execution in {"compiled", "cuda_graph"},
-        "use_tensorrt": requested_execution in {"tensorrt", "tensorrt_int8"},
-        "tensorrt_precision": "int8" if requested_execution == "tensorrt_int8" else "fp16",
+        "use_compiled": requested_execution in {"compiled", "cuda_graph", "cuda_graph_full"},
+        "use_tensorrt": requested_execution in {"tensorrt", "tensorrt_cuda_graph"},
+        "tensorrt_cuda_graph": requested_execution == "tensorrt_cuda_graph",
     }
 
 
 def parse_steps(steps: str) -> tuple[int, ...]:
-    """Parse a comma-separated step list."""
     parsed = tuple(int(part.strip()) for part in steps.split(",") if part.strip())
     if not parsed:
         raise ValueError("At least one step count is required.")
@@ -67,7 +78,6 @@ def parse_steps(steps: str) -> tuple[int, ...]:
 
 
 def parse_model_dtype(dtype_name: str):
-    """Map a compact dtype name to a torch dtype."""
     import torch
 
     dtype_name = dtype_name.lower()
@@ -81,19 +91,13 @@ def parse_model_dtype(dtype_name: str):
 
 
 def resolve_execution(execution: str, device) -> str:
-    """Resolve auto execution mode from the selected device."""
     requested = execution.lower().replace("-", "_")
     if requested == "auto":
-        # Map auto to sensible defaults per device:
-        # - CUDA: prefer cuda_graph for best throughput when available
-        # - CPU: compiled is supported and may offer speedups
-        # - MPS: use eager because compiled/MPS support is experimental
         if device.type == "cuda":
             return "cuda_graph"
         if device.type == "cpu":
             return "compiled"
         if device.type == "mps":
             return "eager"
-        # Fallback to eager for unknown devices
         return "eager"
     return requested

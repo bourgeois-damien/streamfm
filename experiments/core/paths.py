@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from experiments.common import find_repo_root
+from experiments.core.repo import find_repo_root
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,6 @@ def make_benchmark_paths(
     config_dir: Path | str | None = None,
     checkpoint_roots: tuple[Path | str, ...] | None = None,
 ) -> BenchmarkPaths:
-    """Create normalized paths for local or remote execution."""
     root = Path(repo_root).resolve() if repo_root is not None else find_repo_root()
     cfg_dir = Path(config_dir).resolve() if config_dir is not None else root / "config"
     if checkpoint_roots:
@@ -29,7 +28,6 @@ def make_benchmark_paths(
 
 
 def checkpoint_path(filename: str, paths: BenchmarkPaths) -> str:
-    """Resolve a checkpoint by searching configured checkpoint roots."""
     requested = Path(filename).expanduser()
     if requested.is_absolute() or requested.parent != Path("."):
         if requested.exists():
