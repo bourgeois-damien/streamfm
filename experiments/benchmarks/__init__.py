@@ -5,7 +5,7 @@
 
 Import focused modules directly, for example:
 
-- `experiments.benchmarks.options`
+- `experiments.core.options`
 - `experiments.benchmarks.runner`
 - `experiments.benchmarks.results`
 '''

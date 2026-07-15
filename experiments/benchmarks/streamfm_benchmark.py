@@ -11,8 +11,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from experiments.common import find_repo_root, select_torch_device
-from experiments.benchmarks.paths import make_benchmark_paths
+from experiments.core.repo import find_repo_root
+from experiments.core.devices import select_torch_device
+from experiments.core.paths import make_benchmark_paths
 from experiments.benchmarks.results import DEFAULT_WANDB_PROJECT, record_benchmark_results
 from experiments.benchmarks.runner import run_benchmark
 

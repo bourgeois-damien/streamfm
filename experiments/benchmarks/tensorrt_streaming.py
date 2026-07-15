@@ -314,7 +314,7 @@ class TensorRTStreamingAdapter:
         """
         import torch
 
-        from experiments.common import empty_model_tensor, pack_ri_channels
+        from experiments.core.tensors import empty_model_tensor, pack_ri_channels
 
         if self.input_channels != 4:
             return {"stage_profile_available": False}
@@ -466,7 +466,8 @@ def benchmark_tensorrt_flow_steps_cuda_graph(
     """
     import torch
 
-    from experiments.common import empty_model_tensor, pack_ri_channels, summarize_ms
+    from experiments.core.tensors import empty_model_tensor, pack_ri_channels
+    from experiments.core.timing import summarize_ms
     from experiments.benchmarks.cuda_profile_range import CudaProfileRange
 
     if device.type != "cuda":

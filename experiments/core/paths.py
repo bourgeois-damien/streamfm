@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from experiments.common import find_repo_root
+from experiments.core.repo import find_repo_root
 
 
 @dataclass(frozen=True)

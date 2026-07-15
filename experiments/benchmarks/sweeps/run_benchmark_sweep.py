@@ -15,10 +15,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from experiments.benchmarks.paths import make_benchmark_paths
+from experiments.core.paths import make_benchmark_paths
 from experiments.benchmarks.results import build_benchmark_records, record_benchmark_results
 from experiments.benchmarks.runner import run_benchmark
-from experiments.common import find_repo_root, select_torch_device
+from experiments.core.repo import find_repo_root
+from experiments.core.devices import select_torch_device
 
 DEFAULT_INPUT_AUDIO = "inputs/test_clips/audio_43m28_10s.wav"
 MODAL_HARDWARE = frozenset({"CPU", "T4", "L4", "L40S", "A100"})

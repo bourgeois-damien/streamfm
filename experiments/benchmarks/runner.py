@@ -4,12 +4,8 @@ import json
 import os
 import time
 
-from experiments.common import (
-    apply_model_memory_format,
-    device_label,
-    normalize_float32_matmul_precision,
-    normalize_model_memory_format,
-)
+from experiments.core.tensors import apply_model_memory_format, normalize_model_memory_format
+from experiments.core.devices import device_label, normalize_float32_matmul_precision
 from experiments.benchmarks.cuda_graph import (
     benchmark_flow_steps_cuda_graph,
     benchmark_se_flow_cuda_graph,
@@ -28,13 +24,13 @@ from experiments.benchmarks.model_loops import (
     benchmark_se_full,
     benchmark_se_predictor,
 )
-from experiments.benchmarks.options import (
+from experiments.core.options import (
     normalize_cli_options,
     parse_model_dtype,
     parse_steps,
     resolve_execution,
 )
-from experiments.benchmarks.paths import BenchmarkPaths
+from experiments.core.paths import BenchmarkPaths
 
 
 def _float_or_default(value, default: float) -> float:

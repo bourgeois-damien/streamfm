@@ -55,7 +55,7 @@ app = modal.App("streamfm-backbone-profile", image=image)
 
 
 def _remote_paths():
-    from experiments.benchmarks.paths import make_benchmark_paths
+    from experiments.core.paths import make_benchmark_paths
 
     return make_benchmark_paths(
         repo_root=REMOTE_ROOT,
@@ -77,7 +77,7 @@ def profile_l4(
 ) -> dict:
     """Detailed eager backbone profile on Modal L4 (stage + aten breakdown)."""
     from experiments.benchmarks.profile_backbone import run_backbone_profile
-    from experiments.modal_cache import configure_shared_modal_cache
+    from experiments.core.modal_cache import configure_shared_modal_cache
 
     configure_shared_modal_cache(volume_root=VOLUME_ROOT, hardware="L4")
     return run_backbone_profile(
@@ -98,7 +98,7 @@ def benchmark_l4_best(
 ) -> list[dict]:
     """Best known L4 config: cuda_graph + fp16 + channels_last (+ eager/compiled refs)."""
     from experiments.benchmarks.runner import run_benchmark
-    from experiments.modal_cache import configure_shared_modal_cache
+    from experiments.core.modal_cache import configure_shared_modal_cache
     import torch
 
     cache_info = configure_shared_modal_cache(volume_root=VOLUME_ROOT, hardware="L4")

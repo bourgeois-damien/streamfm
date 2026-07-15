@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
-import fcntl
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from experiments.core.history import history_file_lock, write_json_atomic
 
 
 DEFAULT_HISTORY_JSON = "outputs/streamfm_benchmark_history.json"
@@ -150,33 +149,6 @@ def compact_history_value(row: dict, key: str):
             return round(value, 4)
         return round(value, 6)
     return value
-
-
-@contextmanager
-def history_file_lock(history_path: Path):
-    """Serialize history updates across concurrent benchmark processes."""
-    lock_path = history_path.with_name(f"{history_path.name}.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-
-
-def write_json_atomic(path: Path, data) -> None:
-    """Write JSON through a temporary file, then atomically replace the target."""
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    try:
-        tmp_path.write_text(
-            json.dumps(data, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        tmp_path.replace(path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
 
 
 def write_history_summaries(history_path: Path, rows: list[dict]) -> None:

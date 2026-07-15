@@ -6,8 +6,8 @@ from __future__ import annotations
 # visible in the conversation/context. Do not use as-is without reconstructing
 # and verifying the missing sections from another reliable source.
 
-from experiments.common import ensure_repo_importable
-from experiments.benchmarks.paths import BenchmarkPaths, checkpoint_path
+from experiments.core.repo import ensure_repo_importable
+from experiments.core.paths import BenchmarkPaths, checkpoint_path
 from sgmse.util.model_compression import apply_backbone_compression_, get_compression_metadata
 
 

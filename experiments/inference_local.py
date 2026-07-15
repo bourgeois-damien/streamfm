@@ -14,7 +14,7 @@ import torch
 import torchaudio
 import tqdm
 
-from experiments.common import select_torch_device
+from experiments.core.devices import select_torch_device
 from sgmse.model import CustomRKSolverEnhancementModel, DiscriminativeModel
 
 

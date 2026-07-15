@@ -248,7 +248,7 @@ def probe(
     if REMOTE_ROOT not in sys.path:
         sys.path.insert(0, REMOTE_ROOT)
     from experiments.benchmarks.loading import load_flow_model
-    from experiments.benchmarks.paths import make_benchmark_paths
+    from experiments.core.paths import make_benchmark_paths
 
     torch.manual_seed(42)
     device = torch.device("cuda")

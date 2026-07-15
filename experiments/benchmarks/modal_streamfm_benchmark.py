@@ -15,9 +15,9 @@ VOLUME_ROOT = "/data"
 if REMOTE_ROOT not in sys.path:
     sys.path.insert(0, REMOTE_ROOT)
 
-from experiments.benchmarks.paths import make_benchmark_paths
+from experiments.core.paths import make_benchmark_paths
 from experiments.benchmarks.results import DEFAULT_WANDB_PROJECT, record_benchmark_results
-from experiments.modal_cache import configure_shared_modal_cache
+from experiments.core.modal_cache import configure_shared_modal_cache
 
 
 CACHE_VOLUME = modal.Volume.from_name("streamfm-cache")

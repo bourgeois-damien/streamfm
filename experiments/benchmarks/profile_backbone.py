@@ -18,8 +18,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.benchmarks.loading import load_flow_model
-from experiments.benchmarks.paths import make_benchmark_paths
-from experiments.common import apply_model_memory_format, prepare_streaming_state
+from experiments.core.paths import make_benchmark_paths
+from experiments.core.tensors import apply_model_memory_format
+from experiments.core.streaming_state import prepare_streaming_state
 from sgmse.backbones.streaming_unet import CausalConv2d, CausalDecoupledConv2d, CausalNCSNpp
 
 

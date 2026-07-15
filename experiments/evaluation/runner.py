@@ -10,15 +10,11 @@ from uuid import uuid4
 
 import numpy as np
 
-from experiments.benchmarks.options import parse_model_dtype, resolve_execution
-from experiments.benchmarks.paths import BenchmarkPaths, checkpoint_path
-from experiments.common import (
-    apply_model_memory_format,
-    device_label,
-    ensure_repo_importable,
-    normalize_float32_matmul_precision,
-    normalize_model_memory_format,
-)
+from experiments.core.options import parse_model_dtype, resolve_execution
+from experiments.core.paths import BenchmarkPaths, checkpoint_path
+from experiments.core.tensors import apply_model_memory_format, normalize_model_memory_format
+from experiments.core.devices import device_label, normalize_float32_matmul_precision
+from experiments.core.repo import ensure_repo_importable
 from experiments.evaluation.options import (
     normalize_part,
     normalize_pipeline,
