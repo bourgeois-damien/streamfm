@@ -19,7 +19,7 @@ from pesq import pesq
 from pystoi import stoi
 from torchaudio import functional as AF
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -179,7 +179,6 @@ def _psnr(clean: torch.Tensor, enhanced: torch.Tensor, max_value: float = 1.0) -
 
 
 def _lsd(clean: torch.Tensor, enhanced: torch.Tensor, sample_rate: int) -> float:
-    """Log-spectral distance using 32 ms Hann windows and 75% overlap."""
     n_fft = int(round(0.032 * sample_rate))
     hop = int(round(0.008 * sample_rate))
     window = torch.hann_window(n_fft, device=clean.device)
@@ -372,7 +371,6 @@ NOISY_CACHE_VERSION = 1
 
 
 def _default_noisy_cache_path(manifest_path: Path) -> Path:
-    """Use one persistent cache file without creating a file per audio pair."""
     if manifest_path.is_absolute() and str(manifest_path).startswith("/data/"):
         return Path("/data/outputs/evaluation_cache/noisy_metrics.json")
     return REPO_ROOT / "outputs" / "evaluation_cache" / "noisy_metrics.json"
@@ -556,9 +554,6 @@ def score_dataset_noisy(
 
 
 def _build_stftpr_extractor():
-    """Feature extractor matching config/streamfm_stftpr.yaml (n_fft=512, hop=256,
-    sqrt-Hann, alpha=0.5, normalized STFT, Nyquist bin cut). Used to build the
-    phase-retrieval degraded input from clean audio."""
     from sgmse.feature_extractors import CompressedAmplitudeComplexSTFT
 
     return CompressedAmplitudeComplexSTFT(
@@ -575,24 +570,50 @@ def _build_stftpr_extractor():
     )
 
 
+def _build_melflow_extractor():
+    from sgmse.feature_extractors import CompressedAmplitudeComplexSTFT
+
+    return CompressedAmplitudeComplexSTFT(
+        window="hann",
+        n_fft=512,
+        hop_length=256,
+        sampling_rate=16000,
+        alpha=0.5,
+        beta=1.0,
+        compression_is_learnable=False,
+        normalized_stft=True,
+        cut_highest_freqs=1,
+        sqrt_window=False,
+    )
+
+
+def _build_melflow_projector():
+    from sgmse.util.diffphase import PhaselessMelAndBack
+
+    return PhaselessMelAndBack(
+        n_mels=80,
+        sample_rate=16000,
+        f_min=0.0,
+        f_max=8000,
+        n_stft=256,
+        norm="slaney",
+        mel_scale="slaney",
+        alpha=0.5,
+    )
+
+
 def _phase_retrieval_degrade(
     clean: torch.Tensor,
     extractor,
     *,
     phase_mode: str,
     seed: int,
+    mel_projector=None,
 ) -> torch.Tensor:
-    """Build the phase-retrieval degraded input for a clean signal.
-
-    Mirrors what the FlowModel sees at inference: it keeps only the STFT
-    magnitude (``post_Y_fn=ComplexAbs``) and must recover the phase. Here we
-    reconstruct a time-domain signal from that magnitude with either zeroed or
-    random phase, so metrics quantify the starting-point degradation.
-
-    clean: [1, T] mono tensor. Returns a [1, T] degraded tensor.
-    """
     x = clean.unsqueeze(0)  # [B=1, C=1, T]
     spec = extractor.forward(x)  # compressed complex STFT [1, 1, F, T]
+    if mel_projector is not None:
+        spec = mel_projector(spec)
     magnitude = spec.abs()
     if phase_mode == "zero":
         degraded_spec = magnitude + 0j
@@ -623,9 +644,6 @@ def score_dataset_phaseless(
     include_per_file: bool = False,
     include_stats: bool = False,
 ) -> dict:
-    """Score the phase-retrieval degraded input (magnitude-only reconstruction)
-    against clean, per file. No model inference: the degraded signal is derived
-    from the clean STFT magnitude, matching what the stftpr model starts from."""
     crop_mode = crop_mode.lower().replace("-", "_")
     if crop_mode not in {"full", "config"}:
         raise ValueError("--crop-mode must be 'full' or 'config'.")
@@ -643,19 +661,23 @@ def score_dataset_phaseless(
         selection_seed=selection_seed,
         crop_mode=crop_mode,
     )
-    extractor = _build_stftpr_extractor()
+    if task == "melflow":
+        extractor = _build_melflow_extractor()
+        mel_projector = _build_melflow_projector()
+    else:
+        extractor = _build_stftpr_extractor()
+        mel_projector = None
     per_file = []
     for item in items:
         clean, clean_sr = _load_mono(item["clean_path"])
         if item["target_num_samples"] > 0:
             clean = _center_crop_or_pad(clean, item["target_num_samples"])
-        # deterministic per-file phase so subsampling variance is only from
-        # which files are selected, not from the phase realization
         degraded = _phase_retrieval_degrade(
             clean,
             extractor,
             phase_mode=phase_mode,
             seed=phase_seed + int(item["index"]),
+            mel_projector=mel_projector,
         )
         clean, degraded = _align_pair(clean, degraded)
         row = {
@@ -727,7 +749,6 @@ def score_manifest(
         if isinstance(cached_entry, dict) and isinstance(cached_entry.get("metrics"), dict):
             cached_noisy_metrics = cached_entry["metrics"]
         elif isinstance(cached_entry, dict):
-            # Backward-compatible with the initial cache format.
             cached_noisy_metrics = cached_entry
         else:
             cached_noisy_metrics = None
@@ -852,7 +873,7 @@ def _run_modal(args: argparse.Namespace) -> None:
     command = [
         _modal_executable(),
         "run",
-        "experiments/evaluation/modal_score_manifest.py",
+        "experiments/evaluation/scoring/modal_score_manifest.py",
         "--source",
         args.source,
         "--limit",
@@ -911,36 +932,30 @@ def _run_modal(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Score a Stream.FM eval manifest against clean references.")
-    parser.add_argument("manifest", type=Path, nargs="?", help="Path to outputs/eval_runs/<run>/manifest.json.")
+    parser = argparse.ArgumentParser(description="Score an eval manifest.")
+    parser.add_argument("manifest", type=Path, nargs="?", help="manifest.json path")
     parser.add_argument("--backend", choices=("local", "modal"), default="local")
     parser.add_argument("--source", choices=("manifest", "dataset"), default="manifest")
-    parser.add_argument("--run-name", default="", help="Run directory name under outputs/eval_runs.")
-    parser.add_argument("--limit", type=int, default=0, help="Score N selected files. 0 means all files.")
+    parser.add_argument("--run-name", default="")
+    parser.add_argument("--limit", type=int, default=0, help="0 = all")
     parser.add_argument("--offset", type=int, default=0)
-    parser.add_argument(
-        "--selection",
-        choices=("first", "random"),
-        default="random",
-        help="random selects a reproducible subset; first selects files after offset in dataset order.",
-    )
-    parser.add_argument("--selection-seed", type=int, default=42, help="Seed used when --selection random.")
+    parser.add_argument("--selection", choices=("first", "random"), default="random")
+    parser.add_argument("--selection-seed", type=int, default=42)
     parser.add_argument("--task", default="se")
     parser.add_argument("--split", default="test", choices=("train", "valid", "test"))
     parser.add_argument("--data-path", default="")
     parser.add_argument("--data-format", default="")
     parser.add_argument("--crop-mode", choices=("full", "config"), default="full")
-    parser.add_argument("--with-distillmos", action="store_true", help="Also compute DistillMOS if the package is installed.")
+    parser.add_argument("--with-distillmos", action="store_true")
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--score-target", choices=("enhanced", "noisy"), default="enhanced")
-    parser.add_argument("--include-stats", action="store_true", help="Include mean/min/median/max metric stats.")
-    parser.add_argument("--include-per-file", action="store_true", help="Include per-file metric rows in the JSON output.")
+    parser.add_argument("--include-stats", action="store_true")
+    parser.add_argument("--include-per-file", action="store_true")
     parser.add_argument(
         "--local-log-dir",
         default=str(REPO_ROOT / "outputs" / "evaluation_logs"),
-        help="Local directory where score command/metrics JSON copies are saved.",
     )
-    parser.add_argument("--no-local-log", action="store_true", help="Disable local score metadata copies.")
+    parser.add_argument("--no-local-log", action="store_true")
     args = parser.parse_args()
 
     if args.backend == "modal":

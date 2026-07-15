@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import time
+import json
 import os
+from pathlib import Path
+import time
 from typing import Any
 
 
@@ -32,12 +34,17 @@ def _unflatten_tensor_state(template: Any, values) -> Any:
 
 
 def _enable_functional_state_updates(model) -> None:
-    """Make causal-convolution state transitions exportable without mutation."""
     from sgmse.backbones.streaming_unet import CausalConv2d, CausalDecoupledConv2d
 
     for module in model.modules():
         if isinstance(module, (CausalConv2d, CausalDecoupledConv2d)):
             module.functional_state_updates = True
+
+
+def _state_signature(state_tensors) -> str:
+    return ";".join(
+        f"{tuple(tensor.shape)}:{tensor.dtype}" for tensor in state_tensors
+    )
 
 
 def _make_step_module(model, state_template):
@@ -60,8 +67,49 @@ def _make_step_module(model, state_template):
     return Step().eval()
 
 
+def _export_value_summary(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        return [_export_value_summary(item) for item in value]
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        return {
+            "shape": [str(dimension) for dimension in shape],
+            "dtype": str(getattr(value, "dtype", "")),
+            "stride": [str(item) for item in value.stride()] if hasattr(value, "stride") else None,
+        }
+    return repr(value)
+
+
+def _dump_exported_ops_from_env(program) -> dict[str, Any]:
+    output_path = os.environ.get("STREAMFM_TRT_EXPORTED_OPS_PATH", "")
+    if not output_path:
+        return {"exported_ops_available": False}
+
+    nodes = []
+    for node in program.graph_module.graph.nodes:
+        nodes.append(
+            {
+                "name": node.name,
+                "op": node.op,
+                "target": str(node.target),
+                "input_nodes": [input_node.name for input_node in node.all_input_nodes],
+                "output": _export_value_summary(node.meta.get("val")),
+                "nn_module_stack": repr(node.meta.get("nn_module_stack")),
+                "source_fn_stack": repr(node.meta.get("source_fn_stack")),
+                "stack_trace": node.meta.get("stack_trace", ""),
+            }
+        )
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"nodes": nodes}, indent=2), encoding="utf-8")
+    return {
+        "exported_ops_available": True,
+        "exported_ops_count": len(nodes),
+        "exported_ops_path": str(path),
+    }
+
+
 def _preserve_modelopt_amax_buffers_for_export() -> None:
-    """Avoid ModelOpt 0.17 turning calibrated Q/DQ scales into fake tensors."""
     from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
     from modelopt.torch.quantization.utils import is_torch_export_mode
 
@@ -78,134 +126,298 @@ def _preserve_modelopt_amax_buffers_for_export() -> None:
 
 
 def _apply_tensorrt_int8_ptq(
-    model, *, input_channels: int, input_freqs: int, calibration_steps: int
+    model,
+    *,
+    input_channels: int,
+    input_freqs: int,
+    calibration_steps: int,
+    quant_format: str = "int8",
+    quant_scope: str = "all",
+    quant_coverage: float = 0.8,
+    calibration_source: str = "audio",
+    calibration_files: int = 16,
+    calibration_seconds: float = 1.5,
+    calibration_split: str = "train",
+    calibration_solver_steps: tuple[int, ...] = (1, 5),
+    calibration_seed: int = 0,
 ):
-    """Calibrate ModelOpt Q/DQ on actual one-frame streaming calls."""
-    import torch
-    import modelopt.torch.quantization as mtq
+    from experiments.benchmarks.tensorrt.quantization import apply_int8_ptq
 
-    raw_step = getattr(type(model).forward_step, "__wrapped__", None)
-    if raw_step is None:
-        raise RuntimeError("TensorRT INT8 requires the raw CausalNCSNpp.forward_step implementation.")
-
-    def calibrate(module):
-        with torch.inference_mode():
-            # These are calibration samples, not latency samples.  Each starts
-            # from a fresh streaming state and uses the true one-frame API.
-            for _ in range(calibration_steps):
-                state = module.init_state()
-                x = torch.randn(1, input_channels, input_freqs, 1, device="cuda")
-                t = torch.rand(1, device="cuda")
-                raw_step(module, x, time_cond=t, state=state)
-
-    return mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=calibrate)
+    return apply_int8_ptq(
+        model,
+        quant_format=quant_format,
+        quant_scope=quant_scope,
+        quant_coverage=quant_coverage,
+        input_channels=input_channels,
+        input_freqs=input_freqs,
+        calibration_steps=calibration_steps,
+        calibration_source=calibration_source,
+        calibration_files=calibration_files,
+        calibration_seconds=calibration_seconds,
+        calibration_split=calibration_split,
+        calibration_solver_steps=calibration_solver_steps,
+        calibration_seed=calibration_seed,
+    )
 
 
 class TensorRTStreamingAdapter:
-    """A stateful TensorRT FP32, FP16, or calibrated INT8 streaming engine."""
-
     def __init__(
         self,
         model,
         *,
         dtype,
         precision: str = "fp16",
-        calibration_steps: int = 16,
+        calibration_steps: int = 96,
+        quant_scope: str = "all",
+        quant_coverage: float = 0.8,
+        calibration_source: str = "audio",
+        calibration_files: int = 16,
+        calibration_seconds: float = 1.5,
+        calibration_split: str = "train",
+        calibration_solver_steps: tuple[int, ...] = (1, 5),
+        calibration_seed: int = 0,
         use_cuda_graph: bool = False,
         memory_format: str = "contiguous",
+        int8_fallback_dtype=None,
+        allow_tf32: bool | None = None,
+        optimization_level: int = 3,
+        num_avg_timing_iters: int = 1,
+        workspace_size_bytes: int = 0,
+        engine_cache: str = "off",
+        engine_cache_dir=None,
     ):
         import torch
 
         if not torch.cuda.is_available():
             raise ValueError("TensorRT streaming requires CUDA.")
-        if precision not in {"fp32", "fp16", "int8"}:
-            raise ValueError("TensorRT precision must be 'fp32', 'fp16', or 'int8'.")
+        if precision not in {"fp32", "fp16", "int8", "fp8"}:
+            raise ValueError("TensorRT precision must be 'fp32', 'fp16', 'int8', or 'fp8'.")
         if precision == "fp32" and dtype != torch.float32:
             raise ValueError("TensorRT FP32 requires --dtype fp32.")
         if precision == "fp16" and dtype != torch.float16:
             raise ValueError("TensorRT FP16 requires --dtype fp16.")
-        if precision == "int8" and dtype != torch.float32:
-            raise ValueError(
-                "TensorRT INT8 PTQ uses FP32 model I/O and requires --dtype fp32; "
-                "the engine quantizes supported operations internally."
-            )
+        if precision in {"int8", "fp8"} and dtype != torch.float32:
+            raise ValueError("TensorRT INT8/FP8 export needs dtype=fp32.")
+        if int8_fallback_dtype is None:
+            int8_fallback_dtype = torch.float32
+        if precision in {"int8", "fp8"} and int8_fallback_dtype not in {torch.float32, torch.float16}:
+            raise ValueError("TensorRT INT8/FP8 fallback must be FP32 or FP16.")
+        if not 0 <= optimization_level <= 5:
+            raise ValueError("TensorRT optimization level must be between 0 and 5.")
+        if num_avg_timing_iters < 1:
+            raise ValueError("TensorRT average timing iterations must be at least 1.")
+        if workspace_size_bytes < 0:
+            raise ValueError("TensorRT workspace size must be non-negative.")
 
         try:
             import torch_tensorrt
         except ImportError as exc:
-            raise RuntimeError(
-                "TensorRT streaming requires torch-tensorrt in the benchmark environment."
-            ) from exc
+            raise RuntimeError("torch-tensorrt not installed.") from exc
 
         self.model = model.eval().requires_grad_(False)
         _enable_functional_state_updates(self.model)
         self.precision = precision
         self.use_cuda_graph = use_cuda_graph
         self.dtype = dtype
+        self.int8_fallback_dtype = int8_fallback_dtype
+        self.allow_tf32 = allow_tf32
+        self.optimization_level = optimization_level
+        self.num_avg_timing_iters = num_avg_timing_iters
+        self.workspace_size_bytes = workspace_size_bytes
         self.memory_format = memory_format
         self.input_freqs = int(self.model.input_freqs)
         self.input_channels = int(self.model.input_layer.in_channels)
-        if precision == "int8":
-            self.model = _apply_tensorrt_int8_ptq(
+
+        from experiments.benchmarks.tensorrt.engine_cache import (
+            EngineCache,
+            build_cache_config,
+            compute_cache_key,
+            model_signature,
+        )
+
+        cache = EngineCache(engine_cache, engine_cache_dir)
+        self.engine_cache_mode = cache.mode
+        cache_key = ""
+        cache_config: dict[str, Any] = {}
+        cached_entry = None
+        if cache.enabled:
+            cache_config = build_cache_config(
+                model_hash=model_signature(self.model),
+                precision=precision,
+                dtype=str(dtype).replace("torch.", ""),
+                int8_fallback_dtype=str(int8_fallback_dtype).replace("torch.", ""),
+                calibration_steps=calibration_steps,
+                quant_scope=quant_scope,
+                quant_coverage=quant_coverage,
+                calibration_source=calibration_source,
+                calibration_files=calibration_files,
+                calibration_seconds=calibration_seconds,
+                calibration_split=calibration_split,
+                calibration_solver_steps=",".join(str(s) for s in calibration_solver_steps),
+                calibration_seed=calibration_seed,
+                memory_format=memory_format,
+                allow_tf32=allow_tf32,
+                optimization_level=optimization_level,
+                num_avg_timing_iters=num_avg_timing_iters,
+                workspace_size_bytes=workspace_size_bytes,
+                require_full_compilation=(
+                    os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
+                ),
+                input_channels=self.input_channels,
+                input_freqs=self.input_freqs,
+                state_signature=_state_signature(
+                    _flatten_tensor_state(self.model.init_state())
+                ),
+            )
+            cache_key = compute_cache_key(cache_config)
+            cached_entry = cache.lookup(precision, cache_key)
+        self.engine_cache_key = cache_key
+
+        self.calibration_report: dict[str, Any] = {}
+        self.quantization_patches: dict[str, Any] = {}
+        if precision in {"int8", "fp8"} and cached_entry is None:
+            quantized, self.calibration_report = _apply_tensorrt_int8_ptq(
                 self.model,
                 input_channels=self.input_channels,
                 input_freqs=self.input_freqs,
                 calibration_steps=calibration_steps,
-            ).eval().requires_grad_(False)
+                quant_format=precision,
+                quant_scope=quant_scope,
+                quant_coverage=quant_coverage,
+                calibration_source=calibration_source,
+                calibration_files=calibration_files,
+                calibration_seconds=calibration_seconds,
+                calibration_split=calibration_split,
+                calibration_solver_steps=calibration_solver_steps,
+                calibration_seed=calibration_seed,
+            )
+            self.model = quantized.eval().requires_grad_(False)
             _preserve_modelopt_amax_buffers_for_export()
+            from experiments.benchmarks.tensorrt.quantization import (
+                apply_torch_tensorrt_quantization_patches,
+            )
+
+            self.quantization_patches = apply_torch_tensorrt_quantization_patches()
         self._template = self.model.init_state()
         self._initial_state = tuple(_flatten_tensor_state(self._template))
         self._step = _make_step_module(self.model, self._template)
         torch_memory_format = (
             torch.channels_last if memory_format == "channels_last" else torch.contiguous_format
         )
+        example_generator = torch.Generator(device="cuda").manual_seed(20240717)
         x = torch.randn(
-            1, self.input_channels, self.input_freqs, 1, device="cuda", dtype=dtype
+            1,
+            self.input_channels,
+            self.input_freqs,
+            1,
+            generator=example_generator,
+            device="cuda",
+            dtype=dtype,
         ).contiguous(memory_format=torch_memory_format)
         time_cond = torch.full((1,), 0.5, device="cuda", dtype=dtype)
+        compile_kwargs = {
+            "arg_inputs": [x, time_cond, *self._initial_state],
+            "min_block_size": 1,
+            "require_full_compilation": (
+                os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
+            ),
+            "disable_tf32": (allow_tf32 is False),
+            "optimization_level": optimization_level,
+            "num_avg_timing_iters": num_avg_timing_iters,
+            "workspace_size": workspace_size_bytes,
+        }
+        if os.environ.get("STREAMFM_TRT_LAYER_INFO_PATH", ""):
+            compile_kwargs["debug"] = True
+        build_started_at = time.perf_counter()
 
-        # Export before TensorRT compilation: it fixes the 63-state signature
-        # and makes every state transition visible to the engine compiler.
-        if precision == "int8":
+        self.engine_cache_state = "disabled" if not cache.enabled else "miss"
+        self.engine_cache_path = ""
+        cached_metadata: dict[str, Any] = {}
+        if cached_entry is not None:
+            self.engine = cache.load(cached_entry)
+            cached_metadata = cache.read_metadata(cached_entry)
+            self.engine_cache_state = "hit"
+            self.engine_cache_path = str(cached_entry)
+            exported_ops_profile = {"exported_ops_available": False}
+        elif precision in {"int8", "fp8"}:
             from modelopt.torch.quantization.utils import export_torch_mode
 
             with export_torch_mode():
                 program = torch.export.export(self._step, (x, time_cond, *self._initial_state), strict=True)
-            self.engine = torch_tensorrt.dynamo.compile(
-                program,
-                arg_inputs=[x, time_cond, *self._initial_state],
-                min_block_size=1,
-                require_full_compilation=(
-                    os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
-                ),
-            )
+            exported_ops_profile = _dump_exported_ops_from_env(program)
+            quantized_dtype = torch.int8 if precision == "int8" else torch.float8_e4m3fn
+            enabled_precisions = {quantized_dtype, self.int8_fallback_dtype}
+            compile_kwargs["enabled_precisions"] = enabled_precisions
+            self.engine = torch_tensorrt.dynamo.compile(program, **compile_kwargs)
         else:
             program = torch.export.export(self._step, (x, time_cond, *self._initial_state), strict=True)
-            compile_kwargs = {
-                "arg_inputs": [x, time_cond, *self._initial_state],
-                "min_block_size": 1,
-                "require_full_compilation": (
-                    os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
-                ),
-            }
+            exported_ops_profile = _dump_exported_ops_from_env(program)
             if precision == "fp16":
                 compile_kwargs["enabled_precisions"] = {torch.float16}
-            # Omit enabled_precisions for FP32: TensorRT's default is its
-            # native FP32 path, without allowing FP16 tactics implicitly.
             self.engine = torch_tensorrt.dynamo.compile(program, **compile_kwargs)
+        self.engine_build_s = time.perf_counter() - build_started_at
         self.compilation_profile = self._inspect_compiled_engine()
-        # ``use_cuda_graph`` deliberately does *not* enable Torch-TensorRT's
-        # engine-only CUDA-graph wrapper here.  The benchmark captures a
-        # single native CUDA graph around the whole recurrent solver: RI
-        # packing, TensorRT, all recurrent-state copies and the flow update.
-        # Nesting an engine graph inside that outer graph would neither cover
-        # the surrounding work nor give us a meaningful latency comparison.
+        self.compilation_profile.update(exported_ops_profile)
+        self.compilation_profile.update(
+            {
+                "engine_build_s": self.engine_build_s,
+                "optimization_level": optimization_level,
+                "num_avg_timing_iters": num_avg_timing_iters,
+                "workspace_size_bytes": workspace_size_bytes,
+                "workspace_size_mib": workspace_size_bytes / (1024.0 * 1024.0),
+                "workspace_policy": "automatic" if workspace_size_bytes == 0 else "explicit_cap",
+            }
+        )
+        self.compilation_profile.update(self._dump_layer_info_from_env())
+        self.compilation_profile.update(
+            {
+                "engine_cache_mode": self.engine_cache_mode,
+                "engine_cache_state": self.engine_cache_state,
+                "engine_cache_key": self.engine_cache_key,
+                "engine_cache_path": self.engine_cache_path,
+            }
+        )
+        cached_profile = cached_metadata.get("compilation_profile", {})
+        if cached_profile:
+            self.compilation_profile.update(
+                {
+                    f"cached_build_{field}": cached_profile.get(field)
+                    for field in (
+                        "tensorrt_partition_count",
+                        "pytorch_fallback_partition_count",
+                        "tensorrt_partitions",
+                        "pytorch_fallback_partitions",
+                        "engine_build_s",
+                        "int8_fallback_dtype",
+                        "io_dtype",
+                    )
+                }
+            )
+        if cached_entry is None and cache.may_write and cache_key:
+            stored_entry = cache.store(
+                precision,
+                cache_key,
+                self.engine,
+                config=cache_config,
+                arg_inputs=[x, time_cond, *self._initial_state],
+                extra_metadata={"compilation_profile": self.compilation_profile},
+            )
+            if stored_entry is not None:
+                self.engine_cache_state = "stored"
+                self.engine_cache_path = str(stored_entry)
+                self.compilation_profile.update(
+                    {
+                        "engine_cache_state": self.engine_cache_state,
+                        "engine_cache_path": self.engine_cache_path,
+                    }
+                )
+        # we wrap the solver ourselves; skip TRT's engine cuda graph
         self.validation = self._validate_one_step(x, time_cond)
+        self.compilation_profile.update(self._profile_one_engine_run_from_env(x, time_cond))
         self.runtime_profile = self._profile_engine(x, time_cond)
         self.stage_profile = self._profile_full_solver_stages(x, time_cond)
 
     def _inspect_compiled_engine(self) -> dict[str, Any]:
-        """Inventory TensorRT and fallback submodules in the compiled graph."""
         module_types = {}
         named_modules = []
         for name, module in self.engine.named_modules():
@@ -223,15 +435,117 @@ class TensorRTStreamingAdapter:
             for item in named_modules
             if "run_on_gpu" in item["name"].lower() or "fallback" in item["type"].lower()
         ]
+        graph_calls = self._graph_tensorrt_calls()
         return {
             "require_full_compilation": (
                 os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
             ),
+            "allow_tf32": self.allow_tf32,
+            "int8_fallback_dtype": str(self.int8_fallback_dtype).replace("torch.", ""),
+            "io_dtype": str(self.dtype).replace("torch.", ""),
             "compiled_module_types": module_types,
             "tensorrt_partition_count": len(lowered),
             "pytorch_fallback_partition_count": len(fallbacks),
             "tensorrt_partitions": lowered,
             "pytorch_fallback_partitions": fallbacks,
+            "tensorrt_graph_call_count": len(graph_calls),
+            "tensorrt_graph_calls": graph_calls,
+            "tensorrt_execution_confirmed": bool(lowered or graph_calls),
+        }
+
+    def _graph_tensorrt_calls(self) -> list[dict[str, str]]:
+        graph = getattr(self.engine, "graph", None)
+        calls = []
+        for node in getattr(graph, "nodes", ()):
+            target = getattr(node, "target", None)
+            label = str(getattr(target, "_name", None) or getattr(target, "name", None) or target)
+            if "tensorrt" in label.lower():
+                calls.append({"name": str(getattr(node, "name", "")), "target": label})
+        return calls
+
+    def _runtime_engine_modules(self):
+        return [
+            (name, module)
+            for name, module in self.engine.named_modules()
+            if name and callable(getattr(module, "get_layer_info", None))
+        ]
+
+    def _dump_layer_info_from_env(self) -> dict[str, Any]:
+        output_path = os.environ.get("STREAMFM_TRT_LAYER_INFO_PATH", "")
+        if not output_path:
+            return {"engine_layer_info_available": False}
+
+        partitions = []
+        errors = []
+        for name, module in self._runtime_engine_modules():
+            try:
+                raw = module.get_layer_info()
+                try:
+                    layer_info = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    layer_info = raw
+                partitions.append({"name": name, "layer_info": layer_info})
+            except Exception as exc:  # Inspector failure must not invalidate inference.
+                errors.append({"name": name, "error": f"{type(exc).__name__}: {exc}"})
+
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"partitions": partitions, "errors": errors}, indent=2),
+            encoding="utf-8",
+        )
+        return {
+            "engine_layer_info_available": bool(partitions),
+            "engine_layer_info_partition_count": len(partitions),
+            "engine_layer_info_error_count": len(errors),
+            "engine_layer_info_path": str(path),
+        }
+
+    def _profile_one_engine_run_from_env(self, x, time_cond) -> dict[str, Any]:
+        import torch
+
+        output_dir = os.environ.get("STREAMFM_TRT_LAYER_PROFILE_DIR", "")
+        if not output_dir:
+            return {"engine_layer_profile_requested": False}
+
+        path = Path(output_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        modules = [
+            (name, module)
+            for name, module in self._runtime_engine_modules()
+            if callable(getattr(module, "enable_profiling", None))
+            and callable(getattr(module, "disable_profiling", None))
+        ]
+        errors = []
+        enabled = []
+        try:
+            for name, module in modules:
+                try:
+                    module.enable_profiling(str(path))
+                    enabled.append((name, module))
+                except Exception as exc:
+                    errors.append({"name": name, "error": f"{type(exc).__name__}: {exc}"})
+            if enabled:
+                with torch.inference_mode():
+                    state = tuple(tensor.clone() for tensor in self._initial_state)
+                    self.engine(x, time_cond, *state)
+                    torch.cuda.synchronize()
+        finally:
+            for name, module in enabled:
+                try:
+                    module.disable_profiling()
+                except Exception as exc:
+                    errors.append({"name": name, "error": f"{type(exc).__name__}: {exc}"})
+
+        return {
+            "engine_layer_profile_requested": True,
+            "engine_layer_profile_partition_count": len(enabled),
+            "engine_layer_profile_error_count": len(errors),
+            "engine_layer_profile_dir": str(path),
+            "engine_layer_profile_files": sorted(
+                item.name for item in path.glob("**/*") if item.is_file()
+            ),
+            "engine_layer_profile_errors": errors,
         }
 
     def _validate_one_step(self, x, time_cond) -> dict[str, float]:
@@ -254,15 +568,11 @@ class TensorRTStreamingAdapter:
             "output_max_abs_diff": float(output_delta.max()),
             "state_max_abs_diff": state_max,
             "state_tensor_count": len(self._initial_state),
+            "int8_fallback_dtype": str(self.int8_fallback_dtype).replace("torch.", ""),
+            "io_dtype": str(self.dtype).replace("torch.", ""),
         }
 
     def _profile_engine(self, x, time_cond, *, warmup: int = 10, iterations: int = 100) -> dict[str, float]:
-        """Separate host submission time from GPU execution for the TRT call.
-
-        This deliberately excludes the benchmark loop's RI packing and flow
-        update.  It measures the engine boundary, including binding/copying its
-        63 recurrent state inputs and returning its 63 next-state outputs.
-        """
         import torch
 
         with torch.inference_mode():
@@ -296,14 +606,6 @@ class TensorRTStreamingAdapter:
     def _profile_full_solver_stages(
         self, x, time_cond, *, warmup: int = 10, iterations: int = 100
     ) -> dict[str, float]:
-        """Micro-profile the GPU work around one TensorRT engine call.
-
-        This is deliberately *not* CUDA-graph captured: individual CUDA events
-        let us attribute GPU work to input staging, RI packing, the engine,
-        functional recurrent-state copies, and the Euler update.  The absolute
-        total is not a deployment latency; each section has its own launch.
-        The captured benchmark remains the deployment-latency measurement.
-        """
         import torch
 
         from experiments.core.tensors import empty_model_tensor, pack_ri_channels
@@ -397,18 +699,15 @@ class TensorRTStreamingAdapter:
         return report
 
     def init_state(self):
-        """Return fresh engine-I/O buffers, matching normal model ownership."""
         return tuple(tensor.clone() for tensor in self._initial_state)
 
     def reset_state_(self, state) -> None:
-        """Restore state buffers in place, preserving CUDA-graph addresses."""
         if len(state) != len(self._initial_state):
             raise ValueError("Unexpected TensorRT streaming-state length.")
         for destination, source in zip(state, self._initial_state):
             destination.copy_(source)
 
     def eval(self):
-        """Match ``nn.Module.eval`` so the existing streaming loops are unchanged."""
         return self
 
     def forward_step(self, x, *, time_cond=None, state):
@@ -423,18 +722,47 @@ def build_tensorrt_streaming_adapter(
     *,
     dtype,
     precision: str = "fp16",
-    calibration_steps: int = 16,
+    calibration_steps: int = 96,
+    quant_scope: str = "all",
+    quant_coverage: float = 0.8,
+    calibration_source: str = "audio",
+    calibration_files: int = 16,
+    calibration_seconds: float = 1.5,
+    calibration_split: str = "train",
+    calibration_solver_steps: tuple[int, ...] = (1, 5),
+    calibration_seed: int = 0,
     use_cuda_graph: bool = False,
     memory_format: str = "contiguous",
+    int8_fallback_dtype=None,
+    allow_tf32: bool | None = None,
+    optimization_level: int = 3,
+    num_avg_timing_iters: int = 1,
+    workspace_size_bytes: int = 0,
+    engine_cache: str = "off",
+    engine_cache_dir=None,
 ):
-    """Compile a StreamFM backbone for recurrent, one-frame TensorRT inference."""
     return TensorRTStreamingAdapter(
         model,
         dtype=dtype,
         precision=precision,
         calibration_steps=calibration_steps,
+        quant_scope=quant_scope,
+        quant_coverage=quant_coverage,
+        calibration_source=calibration_source,
+        calibration_files=calibration_files,
+        calibration_seconds=calibration_seconds,
+        calibration_split=calibration_split,
+        calibration_solver_steps=calibration_solver_steps,
+        calibration_seed=calibration_seed,
         use_cuda_graph=use_cuda_graph,
         memory_format=memory_format,
+        int8_fallback_dtype=int8_fallback_dtype,
+        allow_tf32=allow_tf32,
+        optimization_level=optimization_level,
+        num_avg_timing_iters=num_avg_timing_iters,
+        workspace_size_bytes=workspace_size_bytes,
+        engine_cache=engine_cache,
+        engine_cache_dir=engine_cache_dir,
     )
 
 
@@ -449,13 +777,6 @@ def benchmark_tensorrt_flow_steps_cuda_graph(
     freq_bins: int = 256,
     frame_budget_ms: float = 16.0,
 ) -> list[dict]:
-    """Benchmark one *whole* recurrent TensorRT solver CUDA graph per frame.
-
-    TensorRT's engine is a pure function with 63 causal states as inputs and
-    63 next states as outputs.  The copies from those outputs into stable
-    state buffers must therefore be captured alongside the engine.  This is
-    intentionally separate from the engine-only Torch-TensorRT graph option.
-    """
     import torch
 
     from experiments.core.tensors import empty_model_tensor, pack_ri_channels
@@ -504,17 +825,12 @@ def benchmark_tensorrt_flow_steps_cuda_graph(
                 outputs = adapter.engine(
                     static_dnn_input, time_tensors[step_idx], *flow_states[step_idx]
                 )
-                # Keep the recurrent input addresses fixed across replays.
-                # The TensorRT output buffers may be transient, but these
-                # copies and the subsequent use are both graph nodes.
                 for state_buffer, next_state in zip(flow_states[step_idx], outputs[1:]):
                     state_buffer.copy_(next_state)
                 static_x_t.add_(outputs[0], alpha=1.0 / steps)
             static_output.copy_(static_x_t)
 
         with torch.inference_mode():
-            # Finish TensorRT lazy setup before capture.  Reusing graph-safe
-            # static buffers is essential: CUDA Graph replays fixed pointers.
             static_y_frame.copy_(source_frames[0])
             for _ in range(3):
                 run_solver()
@@ -528,9 +844,6 @@ def benchmark_tensorrt_flow_steps_cuda_graph(
             torch.cuda.synchronize()
             reset_states()
 
-            # A direct engine invocation and a graph replay must agree from
-            # identical input/state buffers.  This catches accidental state
-            # aliasing before latency numbers are reported.
             static_y_frame.copy_(source_frames[0])
             run_solver()
             expected_output = static_output.clone()
@@ -564,10 +877,13 @@ def benchmark_tensorrt_flow_steps_cuda_graph(
                 for measured_idx, frame_idx in enumerate(range(warmup, total_frames)):
                     with profiler_range.frame(measured_idx):
                         start_event.record()
-                        static_y_frame.copy_(source_frames[frame_idx])
-                        graph.replay()
+                        with profiler_range.section("input_stage"):
+                            static_y_frame.copy_(source_frames[frame_idx])
+                        with profiler_range.section("full_solver_graph_replay"):
+                            graph.replay()
                         end_event.record()
-                        end_event.synchronize()
+                        with profiler_range.section("frame_wait"):
+                            end_event.synchronize()
                         times_ms.append(start_event.elapsed_time(end_event))
                     profiler_range.finish_frame(measured_idx)
             finally:

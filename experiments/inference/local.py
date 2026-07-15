@@ -19,12 +19,10 @@ from sgmse.model import CustomRKSolverEnhancementModel, DiscriminativeModel
 
 
 def select_device(name: str | None) -> torch.device:
-    """Resolve a user device name to the best available torch device."""
     return select_torch_device(name)
 
 
 def load_config_from_cli(argv: list[str]) -> omegaconf.DictConfig:
-    """Parse Hydra-like CLI arguments and compose the selected config."""
     config_name = "streamfm_stftpr"
     config_path = REPO_ROOT / "config"
     overrides = []
@@ -52,7 +50,6 @@ def load_config_from_cli(argv: list[str]) -> omegaconf.DictConfig:
 
 
 def run(cfg: omegaconf.DictConfig) -> None:
-    """Load a checkpoint and enhance all wav files from the input folder."""
     assert hasattr(cfg, "ckpt"), "Pass +ckpt=... with the checkpoint path."
     assert hasattr(cfg, "inpath"), "Pass +inpath=... with a folder containing .wav files."
     assert hasattr(cfg, "outpath"), "Pass +outpath=... with the output folder."
@@ -102,7 +99,6 @@ def run(cfg: omegaconf.DictConfig) -> None:
     torch.manual_seed(cfg.get("seed", 0))
 
     def output_dir_for(path: str) -> str:
-        """Mirror one nested input level in the output folder when needed."""
         if nested_dirs:
             return os.path.join(cfg.outpath, os.path.basename(os.path.dirname(path)))
         return cfg.outpath

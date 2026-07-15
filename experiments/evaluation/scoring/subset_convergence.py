@@ -47,7 +47,6 @@ def analyze(payload: dict, grid, n_boot: int, seed: int) -> dict:
             n = min(int(n), m)
             if n <= 0:
                 continue
-            # empirical bootstrap over subset selections
             means = np.empty(n_boot)
             for b in range(n_boot):
                 idx = rng.choice(m, size=n, replace=False)
@@ -55,7 +54,6 @@ def analyze(payload: dict, grid, n_boot: int, seed: int) -> dict:
             boot_mean = float(means.mean())
             boot_se = float(means.std(ddof=1)) if n_boot > 1 else 0.0
             lo, hi = np.percentile(means, [2.5, 97.5])
-            # analytic SE with finite population correction
             if n < m:
                 fpc = np.sqrt((m - n) / (m - 1))
             else:
@@ -89,7 +87,7 @@ def print_report(label: str, result: dict) -> None:
     for metric, data in result["metrics"].items():
         fm, fs = data["full_mean"], data["full_std"]
         print(f"\n  {metric.upper():6s}  full-set mean = {fm:.4f}   per-file std = {fs:.4f}")
-        print(f"    {'N':>5}  {'mean':>9}  {'±95% (abs)':>11}  {'±95% (%full)':>13}  {'analytic SE':>11}")
+        print(f"    {'N':>5}  {'mean':>9}  {'+/-95% (abs)':>12}  {'+/-95% (%full)':>14}  {'analytic SE':>11}")
         for r in data["rows"]:
             print(
                 f"    {r['n']:>5}  {r['boot_mean']:>9.4f}  {r['abs_halfwidth']:>11.4f}"
@@ -98,7 +96,6 @@ def print_report(label: str, result: dict) -> None:
 
 
 def recommend(result: dict, rel_tol_pct: float) -> dict:
-    """Smallest N whose 95% half-width is within rel_tol_pct of the full mean."""
     rec = {}
     for metric, data in result["metrics"].items():
         chosen = None
@@ -137,7 +134,7 @@ def make_plot(results: dict[str, dict], out_path: Path) -> None:
         ax.set_xlabel("subset size N")
         ax.set_xscale("log")
         ax.grid(True, alpha=0.3)
-    axes[0].set_ylabel("subset-mean metric (±95% over seeds)")
+    axes[0].set_ylabel("subset-mean metric (+/-95% over seeds)")
     axes[-1].legend(fontsize=8, loc="best")
     fig.suptitle("Test-set subsampling convergence (shaded = 95% band over random subsets)", y=1.02)
     fig.tight_layout()

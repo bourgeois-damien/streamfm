@@ -74,8 +74,7 @@ def profile_l4(
     iterations: int = 50,
     warmup: int = 15,
 ) -> dict:
-    """Detailed eager backbone profile on Modal L4 (stage + aten breakdown)."""
-    from experiments.benchmarks.profile_backbone import run_backbone_profile
+    from experiments.benchmarks.profiling.backbone import run_backbone_profile
     from experiments.core.modal_cache import configure_shared_modal_cache
 
     configure_shared_modal_cache(volume_root=VOLUME_ROOT, hardware="L4")
@@ -95,7 +94,6 @@ def benchmark_l4_best(
     iterations: int = 100,
     warmup: int = 20,
 ) -> list[dict]:
-    """Best known L4 config: cuda_graph + fp16 + channels_last (+ eager/compiled refs)."""
     from experiments.benchmarks.runner import run_benchmark
     from experiments.core.modal_cache import configure_shared_modal_cache
     import torch
@@ -137,11 +135,10 @@ def main(
     warmup: int = 15,
     also_best_bench: bool = True,
 ):
-    """Run L4 eager profile (+ optional cuda_graph/compiled/eager benches)."""
     out_dir = Path("outputs/benchmark_profiles")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Launching L4 eager backbone profile…")
+    print("Launching L4 eager backbone profile...")
     report = profile_l4.remote(
         dtype=dtype,
         memory_format=memory_format,
@@ -154,10 +151,9 @@ def main(
     print(json.dumps({"wall_ms": report["wall_ms"], "gpu": report["config"].get("gpu_name")}, indent=2))
 
     if also_best_bench:
-        print("Launching L4 cuda_graph/compiled/eager reference benches with profiler…")
+        print("Launching L4 cuda_graph/compiled/eager reference benches with profiler...")
         benches = benchmark_l4_best.remote()
         bench_path = out_dir / "backbone_l4_best_configs.json"
-        # Strip huge profile_summary duplication for readability in a side file
         slim = []
         for row in benches:
             slim_row = {k: v for k, v in row.items() if k != "profile_summary"}
