@@ -1,0 +1,54 @@
+# Diagnostic L4 : le layout/execution penalise-t-il la conv decomposee ?
+#
+# Hypothese : channels_last (optimal pour la conv DENSE) est pathologique pour la
+# conv groupee/depthwise de la decomposition dec-SVD, ce qui expliquerait pourquoi
+# la compression RALENTIT sur GPU au lieu d'accelerer (contra le papier, GFLOPs).
+#
+# On croise 3 rangs {baseline, k6, k9} x memory_format {channels_last, contiguous}
+# x execution {cuda_graph, eager} = 12 trials, pipeline audio, fp16.
+# Si le compresse devient rapide en contiguous et/ou eager, le coupable est notre
+# config (layout/inductor), pas la compression elle-meme.
+#
+# Lancer :
+#   .venv/bin/python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_l4_layout_diag.yaml \
+#     --wandb-group l4-layout-diag-v1
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  dtype:
+    value: fp16
+  steps:
+    value: 1
+  iterations:
+    value: 500
+  warmup:
+    value: 50
+  execution:
+    values:
+      - cuda_graph
+      - eager
+  memory_format:
+    values:
+      - channels_last
+      - contiguous
+  ckpt:
+    values:
+      - ""
+      - streamfm_stftpr_k6.ckpt
+      - streamfm_stftpr_k9.ckpt
+
+exclude: []

@@ -1,0 +1,41 @@
+# Local Mac CPU — vérif de la config suspecte (eager bf16 contiguous).
+# threads forcés à 1/1. Une seule config pour re-mesurer hors Modal.
+#
+# Lancer:
+#   python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_local_cpu_verify_bf16.yaml \
+#     --wandb-group local-cpu-verify-bf16-t1i1
+#
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: local
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: eager
+  steps:
+    value: 1
+  dtype:
+    value: bf16
+  memory_format:
+    value: contiguous
+  preallocate_model_buffers:
+    value: true
+  iterations:
+    value: 100
+  warmup:
+    value: 20
+  num_threads:
+    value: 1
+  num_interop_threads:
+    value: 1
+  hardware:
+    value: cpu
