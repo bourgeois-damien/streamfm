@@ -92,7 +92,7 @@ def score_remote(
     phase_mode: str = "random",
     phase_seed: int = 1234,
 ) -> dict:
-    from experiments.evaluation.score_manifest import (
+    from experiments.evaluation.scoring.score_manifest import (
         score_dataset_noisy,
         score_dataset_phaseless,
         score_manifest,

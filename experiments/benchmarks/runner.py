@@ -158,7 +158,7 @@ def _benchmark_flow_task(
     model = apply_model_memory_format(model, model_memory_format)
     trt_validation = None
     if use_tensorrt:
-        from experiments.benchmarks.tensorrt_streaming import build_tensorrt_streaming_adapter
+        from experiments.benchmarks.tensorrt.streaming import build_tensorrt_streaming_adapter
 
         model = build_tensorrt_streaming_adapter(
             model,
@@ -181,7 +181,7 @@ def _benchmark_flow_task(
     bench_started_at = time.perf_counter()
 
     if use_tensorrt and tensorrt_cuda_graph and internal_pipeline == "model":
-        from experiments.benchmarks.tensorrt_streaming import (
+        from experiments.benchmarks.tensorrt.streaming import (
             benchmark_tensorrt_flow_steps_cuda_graph,
         )
 

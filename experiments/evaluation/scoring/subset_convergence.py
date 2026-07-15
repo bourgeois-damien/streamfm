@@ -11,7 +11,7 @@ population correction), where ``sigma`` is the per-file standard deviation.
 We report both this analytic SE and an empirical bootstrap over many seeds.
 
 Usage:
-    python experiments/evaluation/subset_convergence.py \
+    python experiments/evaluation/scoring/subset_convergence.py \
         --scores outputs/dataset_scores/se_test_noisy_all_perfile.json \
                  outputs/dataset_scores/stftpr_test_phaseless_random_all_perfile.json \
         --out-dir outputs/convergence

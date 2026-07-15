@@ -852,7 +852,7 @@ def _run_modal(args: argparse.Namespace) -> None:
     command = [
         _modal_executable(),
         "run",
-        "experiments/evaluation/modal_score_manifest.py",
+        "experiments/evaluation/scoring/modal_score_manifest.py",
         "--source",
         args.source,
         "--limit",

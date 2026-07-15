@@ -76,7 +76,7 @@ def profile_l4(
     warmup: int = 15,
 ) -> dict:
     """Detailed eager backbone profile on Modal L4 (stage + aten breakdown)."""
-    from experiments.benchmarks.profile_backbone import run_backbone_profile
+    from experiments.benchmarks.profiling.backbone import run_backbone_profile
     from experiments.core.modal_cache import configure_shared_modal_cache
 
     configure_shared_modal_cache(volume_root=VOLUME_ROOT, hardware="L4")
