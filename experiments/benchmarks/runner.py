@@ -132,6 +132,9 @@ def _benchmark_flow_task(
     iterations: int,
     warmup: int,
     use_compiled: bool,
+    use_tensorrt: bool,
+    tensorrt_precision: str,
+    tensorrt_cuda_graph: bool,
     model_dtype,
     device,
     paths: BenchmarkPaths,
@@ -148,20 +151,56 @@ def _benchmark_flow_task(
     model, cfg = load_flow_model(device, model_dtype, paths, task=task, checkpoint_name=checkpoint_name or None)
     model, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
         model,
-        ptq_int8=ptq_int8,
+        # TensorRT INT8 uses ModelOpt Q/DQ below; do not apply the separate
+        # CPU-native PTQ wrappers first.
+        ptq_int8="" if use_tensorrt else ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
         device=device,
         use_compiled=use_compiled,
         model_dtype=model_dtype,
     )
     model = apply_model_memory_format(model, model_memory_format)
+    trt_validation = None
+    if use_tensorrt:
+        from experiments.benchmarks.tensorrt_streaming import build_tensorrt_streaming_adapter
+
+        model = build_tensorrt_streaming_adapter(
+            model,
+            dtype=model_dtype,
+            precision=tensorrt_precision,
+            calibration_steps=ptq_calib_steps,
+            use_cuda_graph=tensorrt_cuda_graph,
+            memory_format=model_memory_format,
+        )
+        trt_validation = model.validation
+        trt_runtime_profile = model.runtime_profile
+        trt_stage_profile = model.stage_profile
+    else:
+        trt_runtime_profile = None
+        trt_stage_profile = None
     config = _streaming_config_from_model_cfg(cfg)
     freq_bins = int(getattr(model, "input_freqs", config.n_fft // 2 + 1 - config.cut_highest_freqs))
     frame_budget_ms = _frame_budget_ms_from_config(config)
     load_s = time.perf_counter() - load_started_at
     bench_started_at = time.perf_counter()
 
-    if internal_pipeline == "model":
+    if use_tensorrt and tensorrt_cuda_graph and internal_pipeline == "model":
+        from experiments.benchmarks.tensorrt_streaming import (
+            benchmark_tensorrt_flow_steps_cuda_graph,
+        )
+
+        results = benchmark_tensorrt_flow_steps_cuda_graph(
+            model,
+            device,
+            steps_list,
+            iterations,
+            warmup,
+            model_dtype,
+            model_memory_format=model_memory_format,
+            freq_bins=freq_bins,
+            frame_budget_ms=frame_budget_ms,
+        )
+    elif internal_pipeline == "model":
         results = benchmark_flow_steps(
             model,
             device,
@@ -189,7 +228,12 @@ def _benchmark_flow_task(
             frame_budget_ms=frame_budget_ms,
         )
     elif internal_pipeline == "audio":
-        from experiments.streaming.pipeline import StreamingSTFTConfig, make_synthetic_audio, run_streaming_audio_pipeline
+        from experiments.streaming.pipeline import (
+            StreamingSTFTConfig,
+            make_synthetic_audio,
+            run_streaming_audio_pipeline,
+            run_streaming_audio_pipeline_with_tensorrt_cuda_graph,
+        )
 
         audio = _load_input_audio(input_audio_path, config=config, device=device)
         if audio is None:
@@ -200,20 +244,34 @@ def _benchmark_flow_task(
             )
         results = []
         for step_count in steps_list:
-            summary = run_streaming_audio_pipeline(
-                model,
-                audio,
-                device=device,
-                steps=step_count,
-                iterations=iterations,
-                warmup=warmup,
-                use_compiled=use_compiled,
-                config=config,
-                model_dtype=model_dtype,
-                preallocate_model_buffers=preallocate_model_buffers,
-                model_memory_format=model_memory_format,
-                return_audio=save_audio,
-            )
+            if use_tensorrt and tensorrt_cuda_graph:
+                summary = run_streaming_audio_pipeline_with_tensorrt_cuda_graph(
+                    model,
+                    audio,
+                    device=device,
+                    steps=step_count,
+                    iterations=iterations,
+                    warmup=warmup,
+                    config=config,
+                    model_dtype=model_dtype,
+                    model_memory_format=model_memory_format,
+                    return_audio=save_audio,
+                )
+            else:
+                summary = run_streaming_audio_pipeline(
+                    model,
+                    audio,
+                    device=device,
+                    steps=step_count,
+                    iterations=iterations,
+                    warmup=warmup,
+                    use_compiled=use_compiled,
+                    config=config,
+                    model_dtype=model_dtype,
+                    preallocate_model_buffers=preallocate_model_buffers,
+                    model_memory_format=model_memory_format,
+                    return_audio=save_audio,
+                )
             summary["task"] = task
             summary["pipeline"] = "audio"
             summary["device"] = device.type
@@ -259,6 +317,22 @@ def _benchmark_flow_task(
 
     for row in results:
         row["task"] = task
+        if trt_validation is not None:
+            row["execution"] = "tensorrt"
+            row["execution"] = f"tensorrt_{tensorrt_precision}" if tensorrt_precision == "int8" else "tensorrt"
+            row["tensorrt_streaming"] = True
+            row.update({f"tensorrt_{key}": value for key, value in trt_validation.items()})
+            row.update({f"tensorrt_{key}": value for key, value in trt_runtime_profile.items()})
+            row.update({f"tensorrt_{key}": value for key, value in trt_stage_profile.items()})
+            row.update(
+                {
+                    f"tensorrt_compilation_{key}": value
+                    for key, value in getattr(model, "compilation_profile", {}).items()
+                }
+            )
+            if tensorrt_precision == "int8":
+                row["ptq_int8"] = "tensorrt"
+                row["ptq_calib_steps"] = ptq_calib_steps
         if _ptq_meta is not None:
             row["ptq_int8"] = ",".join(_ptq_meta.get("components", []))
             row["ptq_engine"] = _ptq_meta.get("engine", "")
@@ -564,6 +638,9 @@ def run_internal_benchmark(
     iterations: int,
     warmup: int,
     use_compiled: bool,
+    use_tensorrt: bool = False,
+    tensorrt_precision: str = "fp16",
+    tensorrt_cuda_graph: bool = False,
     model_dtype_name: str,
     device,
     paths: BenchmarkPaths,
@@ -579,6 +656,12 @@ def run_internal_benchmark(
     model_dtype = parse_model_dtype(model_dtype_name)
     steps_list = parse_steps(steps)
 
+    if use_tensorrt and internal_task not in {"stftpr", "bwe", "derev", "lyra"}:
+        raise ValueError(
+            "execution=tensorrt is currently integrated for the causal flow backbones only, "
+            "not the SE predictor/full pipeline."
+        )
+
     if internal_task in {"stftpr", "bwe", "derev", "lyra"}:
         return _benchmark_flow_task(
             task=internal_task,
@@ -587,6 +670,9 @@ def run_internal_benchmark(
             iterations=iterations,
             warmup=warmup,
             use_compiled=use_compiled,
+            use_tensorrt=use_tensorrt,
+            tensorrt_precision=tensorrt_precision,
+            tensorrt_cuda_graph=tensorrt_cuda_graph,
             model_dtype=model_dtype,
             device=device,
             paths=paths,
@@ -681,6 +767,7 @@ def run_benchmark(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
+    tensorrt_cuda_graph: bool = False,
 ) -> list[dict]:
     """Run one benchmark using the common local/Modal benchmark implementation."""
     import torch
@@ -690,8 +777,17 @@ def run_benchmark(
     model_memory_format = normalize_model_memory_format(model_memory_format)
     float32_matmul_precision = normalize_float32_matmul_precision(float32_matmul_precision)
 
-    if execution == "cuda_graph" and device.type != "cuda":
-        raise ValueError("execution=cuda_graph requires a CUDA device.")
+    if execution in {"cuda_graph", "tensorrt", "tensorrt_int8"} and device.type != "cuda":
+        raise ValueError(f"execution={execution} requires a CUDA device.")
+    trt_int8 = execution == "tensorrt_int8" or (
+        execution == "tensorrt" and ptq_int8.strip().lower() == "tensorrt"
+    )
+    if execution == "tensorrt" and not trt_int8 and model_dtype_name.lower() not in {"fp16", "fp32"}:
+        raise ValueError("TensorRT requires --dtype fp16 or --dtype fp32.")
+    if trt_int8 and model_dtype_name.lower() != "fp32":
+        raise ValueError("TensorRT INT8 PTQ requires --dtype fp32 for its model I/O.")
+    if tensorrt_cuda_graph and execution not in {"tensorrt", "tensorrt_int8"}:
+        raise ValueError("--tensorrt-cuda-graph requires --execution tensorrt.")
 
     started_at = time.perf_counter()
     os.chdir(paths.repo_root)
@@ -731,6 +827,13 @@ def run_benchmark(
             iterations=iterations,
             warmup=warmup,
             use_compiled=resolved["use_compiled"],
+            use_tensorrt=resolved["use_tensorrt"],
+            tensorrt_precision=(
+                "int8"
+                if trt_int8
+                else ("fp32" if model_dtype_name.lower() == "fp32" else "fp16")
+            ),
+            tensorrt_cuda_graph=tensorrt_cuda_graph,
             model_dtype_name=model_dtype_name,
             device=device,
             paths=paths,

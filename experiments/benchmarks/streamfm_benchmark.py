@@ -140,7 +140,17 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task", default="stftpr", help="Task: stftpr, bwe, derev, lyra, or se.")
     parser.add_argument("--part", default="model", help="Part: model, predictor, or flow.")
     parser.add_argument("--pipeline", default="audio", help="Pipeline: model_only or audio.")
-    parser.add_argument("--execution", default="auto", help="Execution: auto, eager, compiled, or cuda_graph.")
+    parser.add_argument(
+        "--execution",
+        default="auto",
+        help="Execution: auto, eager, compiled, cuda_graph, or tensorrt (FP32/FP16; add --ptq-int8 for INT8).",
+    )
+    parser.add_argument(
+        "--tensorrt-cuda-graph",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Capture/replay the complete TensorRT streaming solver with CUDA Graph (TensorRT execution only).",
+    )
     parser.add_argument("--steps", default="1", help="Comma-separated flow step counts.")
     parser.add_argument("--iterations", type=int, default=100, help="Measured frame count. Use --audio-duration-s for duration-based audio runs.")
     parser.add_argument("--warmup", type=int, default=10)
@@ -169,10 +179,13 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--ptq-int8",
+        nargs="?",
+        const="tensorrt",
         default="",
         help=(
-            "Optional INT8 PTQ components: linear, conv, causal_conv, all "
-            "(comma-separated). CPU + fp32 + eager only."
+            "INT8 PTQ. With --execution tensorrt, use --ptq-int8 tensorrt "
+            "(or the bare flag locally) for TensorRT INT8. Otherwise accepts "
+            "CPU components: linear, conv, causal_conv, all."
         ),
     )
     parser.add_argument(
@@ -193,7 +206,11 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Enable PyTorch profiler for the inference benchmark only (excludes load/compile).",
+        help=(
+            "Enable the generic PyTorch profiler. It is useful for eager/compiled "
+            "operator attribution but includes model construction; use the TensorRT "
+            "runtime stage metrics and an Nsight trace for CUDA Graph analysis."
+        ),
     )
     parser.add_argument(
         "--profile-all",
@@ -258,6 +275,7 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
         checkpoint_name=args.ckpt,
         ptq_int8=args.ptq_int8,
         ptq_calib_steps=args.ptq_calib_steps,
+        tensorrt_cuda_graph=args.tensorrt_cuda_graph,
     )
     _save_audio_results(results, args, backend="local", hardware=hardware)
     record_benchmark_results(
@@ -290,6 +308,7 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
             "preallocate_model_buffers": args.preallocate_model_buffers,
             "ptq_int8": args.ptq_int8,
             "ptq_calib_steps": args.ptq_calib_steps,
+            "tensorrt_cuda_graph": args.tensorrt_cuda_graph,
             "save_audio": args.save_audio,
             "audio_output_dir": args.audio_output_dir,
             "input_audio": args.input_audio_path,
@@ -309,6 +328,8 @@ def _run_modal(args: argparse.Namespace, hardware: str) -> None:
     """Delegate Modal execution to the Modal wrapper."""
     modal_script = Path("experiments/benchmarks/modal_streamfm_benchmark.py")
     command = [
+        sys.executable,
+        "-m",
         "modal",
         "run",
         str(modal_script),
@@ -347,6 +368,8 @@ def _run_modal(args: argparse.Namespace, hardware: str) -> None:
     if args.ptq_int8:
         command.extend(["--ptq-int8", args.ptq_int8])
         command.extend(["--ptq-calib-steps", str(args.ptq_calib_steps)])
+    if args.tensorrt_cuda_graph:
+        command.append("--tensorrt-cuda-graph")
     if args.save_audio:
         command.append("--save-audio")
     if args.profile:
