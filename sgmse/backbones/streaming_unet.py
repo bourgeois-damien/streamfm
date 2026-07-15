@@ -490,7 +490,7 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
         temb = self.prepare_temb(time_cond)
         m_idx = 0
 
-        h0, _ = self.input_layer.forward_step(x, state=state[m_idx])
+        h0, state[m_idx] = self.input_layer.forward_step(x, state=state[m_idx])
         m_idx += 1
         hs_up = [h0]
         input_pyramid = x
@@ -499,13 +499,13 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
         # Down path
         for l in range(self.num_resolutions):
             for k in range(self.num_res_blocks):
-                h, _ = self.down_modules[f'lvl{l}_rnb{k}'].forward_step(
+                h, state[m_idx] = self.down_modules[f'lvl{l}_rnb{k}'].forward_step(
                     h, temb, state=state[m_idx])
                 m_idx += 1
 
                 hs_up.append(h)
             if l != self.num_resolutions - 1:
-                h, _ = self.down_modules[f'lvl{l}_rnb_down'].forward_step(
+                h, state[m_idx] = self.down_modules[f'lvl{l}_rnb_down'].forward_step(
                     h, temb, state=state[m_idx])
                 m_idx += 1
 
@@ -515,11 +515,11 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
 
                 h = self.down_modules[f'lvl{l}_combiner'](input_pyramid, h)
 
-        h, _ = self.bottleneck_modules['rnb1'].forward_step(h, temb, state=state[m_idx])
+        h, state[m_idx] = self.bottleneck_modules['rnb1'].forward_step(h, temb, state=state[m_idx])
         m_idx += 1
         if self.attn_bottleneck:
             raise NotImplementedError("Bottleneck attention is currently not implemented for forward_step!")
-        h, _ = self.bottleneck_modules['rnb2'].forward_step(h, temb, state=state[m_idx])
+        h, state[m_idx] = self.bottleneck_modules['rnb2'].forward_step(h, temb, state=state[m_idx])
         m_idx += 1
 
         # Up path
@@ -528,16 +528,16 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
             nrb = self.num_res_blocks + (1 if l == 0 else 0)
             for k in range(nrb):
                 h_input = self.up_modules[f'lvl{l}_combiner{k}'](hs_up.pop(), h)
-                h, _ = self.up_modules[f'lvl{l}_rnb{k}'].forward_step(
+                h, state[m_idx] = self.up_modules[f'lvl{l}_rnb{k}'].forward_step(
                     h_input, temb, state=state[m_idx])
                 m_idx += 1
 
-            pyramid_h, _ = self.up_modules[f'lvl{l}_pyramid_normconv'].forward_step(
+            pyramid_h, state[m_idx] = self.up_modules[f'lvl{l}_pyramid_normconv'].forward_step(
                 h, state=state[m_idx])
             m_idx += 1
 
             if l != self.num_resolutions - 1:
-                pyramid_up, _ = self.pyramid_upsample.forward_step(
+                pyramid_up, state[m_idx] = self.pyramid_upsample.forward_step(
                     pyramid, state=state[m_idx])
                 m_idx += 1
 
@@ -546,7 +546,7 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
                 pyramid = pyramid_h
 
             if l != 0:
-                h, _ = self.up_modules[f'lvl{l}_rnb_up'].forward_step(
+                h, state[m_idx] = self.up_modules[f'lvl{l}_rnb_up'].forward_step(
                     h, temb, state=state[m_idx])
                 m_idx += 1
             else:
@@ -899,9 +899,16 @@ class CausalConv2d(nn.Conv2d, CausalStreamingModule):
         B, C, Fr, T = x.shape
         xbuf, = state
 
-        # shift buffer to the left by one frame. potential for further optimization here?
-        xbuf[..., :-1] = xbuf[..., 1:].clone()
-        xbuf[..., :, -1] = x[0, :, :, 0].clone()
+        if getattr(self, "functional_state_updates", False):
+            # TensorRT exports recurrent state as engine outputs.  It cannot
+            # accept in-place writes to an input buffer, so this equivalent
+            # functional path constructs the next state explicitly.  The
+            # default stays in-place for the existing PyTorch/CUDA-Graph path.
+            xbuf = torch.cat((xbuf[..., 1:], x[0, :, :, 0].unsqueeze(-1)), dim=-1)
+        else:
+            # shift buffer to the left by one frame. potential for further optimization here?
+            xbuf[..., :-1] = xbuf[..., 1:].clone()
+            xbuf[..., :, -1] = x[0, :, :, 0].clone()
 
         # Run the conv, produces a single output frame
         xbuf_in = xbuf.view(1, C, Fr, -1)
@@ -1018,9 +1025,12 @@ class CausalDecoupledConv2d(nn.Module, CausalStreamingModule):
         B, C, Fr, T = x.shape
         xbuf, = state
 
-        # shift buffer left
-        xbuf[..., :-1] = xbuf[..., 1:].clone()
-        xbuf[..., :, -1] = x[0, :, :, 0].clone()
+        if getattr(self, "functional_state_updates", False):
+            xbuf = torch.cat((xbuf[..., 1:], x[0, :, :, 0].unsqueeze(-1)), dim=-1)
+        else:
+            # shift buffer left
+            xbuf[..., :-1] = xbuf[..., 1:].clone()
+            xbuf[..., :, -1] = x[0, :, :, 0].clone()
 
         # Run the conv, produces a single output frame
         xbuf_in = xbuf.view(1, C, Fr, -1)
