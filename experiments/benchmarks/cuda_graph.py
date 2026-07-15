@@ -27,6 +27,8 @@ def benchmark_flow_steps_cuda_graph(
     """Benchmark a flow model loop using CUDA Graph replay."""
     import torch
 
+    from experiments.benchmarks.cuda_profile_range import CudaProfileRange
+
     if device.type != "cuda":
         raise ValueError("CUDA Graph execution requires a CUDA device.")
 
@@ -80,15 +82,58 @@ def benchmark_flow_steps_cuda_graph(
             times_ms = []
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
+            profiler_range = CudaProfileRange(
+                torch, label=f"pytorch_cuda_graph_{str(dtype).replace('torch.', '')}"
+            )
+            profiler_range.start()
             measured_start = time.perf_counter()
-            for frame_idx in range(warmup, warmup + iterations):
-                start_event.record()
-                static_y_frame.copy_(source_frames[frame_idx])
-                graph.replay()
-                end_event.record()
-                end_event.synchronize()
-                times_ms.append(start_event.elapsed_time(end_event))
+            try:
+                for measured_idx, frame_idx in enumerate(range(warmup, warmup + iterations)):
+                    with profiler_range.frame(measured_idx):
+                        start_event.record()
+                        static_y_frame.copy_(source_frames[frame_idx])
+                        graph.replay()
+                        end_event.record()
+                        end_event.synchronize()
+                        times_ms.append(start_event.elapsed_time(end_event))
+                    profiler_range.finish_frame(measured_idx)
+            finally:
+                profiler_range.close()
             measured_wall_s = time.perf_counter() - measured_start
+
+            # The latency loop above synchronizes every frame so each sample
+            # is individually valid.  This second pass deliberately submits
+            # the same 100-frame stream without intermediate synchronization:
+            # it separates host enqueue cost from amortized GPU throughput.
+            for state in flow_states:
+                zero_streaming_state(flow, state)
+            torch.cuda.synchronize()
+            idle_copy_submit_us = []
+            idle_graph_submit_us = []
+            for measured_idx in range(iterations):
+                torch.cuda.synchronize()
+                cpu_start = time.perf_counter()
+                static_y_frame.copy_(source_frames[warmup + measured_idx])
+                idle_copy_submit_us.append((time.perf_counter() - cpu_start) * 1_000_000.0)
+                cpu_start = time.perf_counter()
+                graph.replay()
+                idle_graph_submit_us.append((time.perf_counter() - cpu_start) * 1_000_000.0)
+            torch.cuda.synchronize()
+
+            submit_us = []
+            batch_start = torch.cuda.Event(enable_timing=True)
+            batch_end = torch.cuda.Event(enable_timing=True)
+            batch_start.record()
+            batch_wall_start = time.perf_counter()
+            for measured_idx in range(iterations):
+                cpu_start = time.perf_counter()
+                static_y_frame.copy_(source_frames[warmup + measured_idx])
+                graph.replay()
+                submit_us.append((time.perf_counter() - cpu_start) * 1_000_000.0)
+            batch_end.record()
+            batch_end.synchronize()
+            batch_wall_s = time.perf_counter() - batch_wall_start
+            batched_gpu_mean_ms = batch_start.elapsed_time(batch_end) / iterations
 
         summary = summarize_ms(times_ms)
         summary.update(
@@ -106,6 +151,15 @@ def benchmark_flow_steps_cuda_graph(
                 "frame_budget_ms": frame_budget_ms,
                 "budget_ratio_mean": summary["mean_ms"] / frame_budget_ms,
                 "measured_wall_s": measured_wall_s,
+                "cuda_graph_cpu_submit_mean_us": sum(submit_us) / len(submit_us),
+                "cuda_graph_cpu_submit_p50_us": sorted(submit_us)[len(submit_us) // 2],
+                "cuda_graph_idle_copy_submit_mean_us": sum(idle_copy_submit_us) / len(idle_copy_submit_us),
+                "cuda_graph_idle_copy_submit_p50_us": sorted(idle_copy_submit_us)[len(idle_copy_submit_us) // 2],
+                "cuda_graph_idle_replay_submit_mean_us": sum(idle_graph_submit_us) / len(idle_graph_submit_us),
+                "cuda_graph_idle_replay_submit_p50_us": sorted(idle_graph_submit_us)[len(idle_graph_submit_us) // 2],
+                "cuda_graph_batched_gpu_mean_ms": batched_gpu_mean_ms,
+                "cuda_graph_batched_wall_mean_ms": batch_wall_s * 1000.0 / iterations,
+                "cuda_graph_batched_intermediate_sync": False,
             }
         )
         results.append(summary)
