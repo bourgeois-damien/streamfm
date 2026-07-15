@@ -1,3 +1,10 @@
+"""Modal entrypoints that run the benchmark on remote GPUs.
+
+Ships the input audio to a Modal function, runs the benchmark there on the
+requested hardware, and brings the results and profiles back. Invoked via
+``modal run``, not imported.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime

@@ -1,3 +1,8 @@
+"""Report dataset download/extraction progress on Modal.
+
+Inspects the dataset volume and prints sizes and per-archive extraction status.
+"""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,8 @@
+"""Report total audio duration of a dataset on Modal.
+
+Sums per-file durations across the EARS/WHAM split rows on the dataset volume.
+"""
+
 from __future__ import annotations
 
 import csv

@@ -1,3 +1,9 @@
+"""Run a whole sweep grid in one pass.
+
+Expands the grid, shards the trials and runs each one locally or on Modal,
+logging every trial to W&B. The batch alternative to a hosted sweep agent.
+"""
+
 from __future__ import annotations
 
 import argparse

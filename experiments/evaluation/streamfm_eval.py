@@ -1,3 +1,10 @@
+"""Command-line launcher for test-set inference.
+
+Parses the common eval options and runs inference locally or on Modal, writing
+a manifest that ``score_manifest.py`` then scores. The user-facing eval CLI on
+top of ``runner.py``.
+"""
+
 from __future__ import annotations
 
 import argparse

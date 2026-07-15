@@ -1,3 +1,8 @@
+"""Eval result shaping, history summaries and W&B logging.
+
+Flattens score metrics into history rows and builds the matching W&B records.
+"""
+
 from __future__ import annotations
 
 import json

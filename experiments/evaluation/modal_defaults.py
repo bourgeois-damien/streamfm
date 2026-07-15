@@ -1,3 +1,5 @@
+"""Default dataset path resolution for eval running on Modal."""
+
 from __future__ import annotations
 
 MODAL_VOLUME_ROOT = "/data"

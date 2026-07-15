@@ -1,3 +1,10 @@
+"""Shared Modal cache configuration.
+
+``configure_shared_modal_cache`` points the HF/torch caches at the persistent
+Modal volume so weights and datasets survive between runs;
+``CACHE_LAYOUT_VERSION`` namespaces that layout.
+"""
+
 from __future__ import annotations
 
 import os

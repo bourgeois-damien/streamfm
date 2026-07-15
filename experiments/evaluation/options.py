@@ -1,3 +1,9 @@
+"""Eval CLI option normalization.
+
+Maps task names to their config and checkpoint defaults and normalizes the
+solver, steps, split, pipeline and part selections.
+"""
+
 from __future__ import annotations
 
 import re

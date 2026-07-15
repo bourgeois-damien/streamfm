@@ -1,3 +1,9 @@
+"""Checkpoint and config path resolution.
+
+``BenchmarkPaths`` bundles the repo root, config dir and checkpoint roots;
+``checkpoint_path`` finds a named checkpoint across them.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

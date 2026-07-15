@@ -1,3 +1,10 @@
+"""Local simulated-streaming runner for Stream.FM STFTPR.
+
+Loads the STFTPR backbone and drives the streaming pipeline over an audio file
+(or synthetic audio), writing the reconstructed output. The CLI entry point for
+trying the streaming path locally.
+"""
+
 from __future__ import annotations
 
 import argparse

@@ -1,3 +1,10 @@
+"""Streaming STFT framing helpers.
+
+Sqrt-Hann analysis/synthesis windowing, complex compression/decompression,
+real-imag frame packing and synthetic-audio generation shared by the streaming
+pipelines. Configured through ``StreamingSTFTConfig``.
+"""
+
 from __future__ import annotations
 
 import math

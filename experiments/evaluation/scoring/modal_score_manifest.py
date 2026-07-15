@@ -1,3 +1,9 @@
+"""Modal entrypoint that scores an eval manifest remotely.
+
+Resolves the manifest on the volume and runs the scoring on Modal. Invoked via
+``modal run``.
+"""
+
 from __future__ import annotations
 
 from difflib import get_close_matches

@@ -1,3 +1,10 @@
+"""CUDA Graph capture-and-replay benchmark loops.
+
+Mirrors the eager loops in ``model_loops.py`` but replays a captured graph so
+per-step launch overhead drops out of the timing (flow steps, SE predictor,
+SE flow, full SE).
+"""
+
 from __future__ import annotations
 
 import time

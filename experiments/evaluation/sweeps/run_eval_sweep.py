@@ -1,3 +1,9 @@
+"""Run a filtered evaluation grid.
+
+Loads the eval sweep YAML, runs each trial locally or on Modal, scores the
+output and logs the metrics to W&B.
+"""
+
 from __future__ import annotations
 
 import argparse

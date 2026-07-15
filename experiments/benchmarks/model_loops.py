@@ -1,3 +1,9 @@
+"""Eager (non-graph) benchmark loops for the backbones.
+
+Baseline timing loops for flow steps, the SE predictor, SE flow and the full SE
+model: one warmup pass, then timed iterations.
+"""
+
 from __future__ import annotations
 
 import time

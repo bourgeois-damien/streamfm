@@ -1,3 +1,9 @@
+"""Minimal local inference entry point.
+
+Loads a config from the CLI, selects a device and runs enhancement on a single
+input. The smallest way to try a checkpoint without the full eval harness.
+"""
+
 import glob
 import os
 import sys

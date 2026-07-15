@@ -1,3 +1,9 @@
+"""Run a single benchmark trial for a W&B sweep.
+
+Reads one trial's parameters from the sweep controller, builds the benchmark
+command, runs it locally or on Modal, and logs the metrics back to the run.
+"""
+
 from __future__ import annotations
 
 import argparse

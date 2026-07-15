@@ -1,10 +1,12 @@
-# TEMPORARY RECOVERY FILE - FOR AUDIT ONLY
-from __future__ import annotations
+"""Checkpoint loading for the benchmark backbones.
 
-# INCOMPLETE / UNKNOWN:
-# This is not a complete recovered module. It only contains pieces explicitly
-# visible in the conversation/context. Do not use as-is without reconstructing
-# and verifying the missing sections from another reliable source.
+Instantiates a backbone from its Hydra config and loads either DNN-only weights
+or the DNN slice of a full training checkpoint, applying the SGMSE compression
+metadata. Exposes per-task loaders: ``load_flow_model``, ``load_se_predictor``,
+``load_se_flow`` and ``load_se_full``.
+"""
+
+from __future__ import annotations
 
 from experiments.core.repo import ensure_repo_importable
 from experiments.core.paths import BenchmarkPaths, checkpoint_path

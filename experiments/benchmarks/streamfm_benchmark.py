@@ -1,3 +1,9 @@
+"""Command-line launcher for the benchmark.
+
+Parses the common options and runs the benchmark either locally or on Modal.
+The user-facing CLI on top of ``runner.py``.
+"""
+
 from __future__ import annotations
 
 import argparse

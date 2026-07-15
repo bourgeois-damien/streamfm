@@ -1,3 +1,9 @@
+"""Eager streaming pipelines.
+
+Plain frame-by-frame streaming audio loops for the STFTPR model and the SE
+model, without graph capture.
+"""
+
 from __future__ import annotations
 
 import time

@@ -1,3 +1,9 @@
+"""Benchmark result shaping, history summaries and W&B logging.
+
+Compacts raw benchmark records into JSON history rows and builds the matching
+Weights & Biases payloads.
+"""
+
 from __future__ import annotations
 
 import json

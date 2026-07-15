@@ -1,3 +1,9 @@
+"""Backfill W&B from saved benchmark history.
+
+Loads existing benchmark history rows from disk, groups them into runs and
+uploads them to Weights & Biases after the fact.
+"""
+
 from __future__ import annotations
 
 import argparse

@@ -1,3 +1,9 @@
+"""Sweep grid expansion and filtering.
+
+Loads a sweep YAML, expands the parameter grid into concrete trials and drops
+the trials matching the exclude rules.
+"""
+
 from __future__ import annotations
 
 import itertools

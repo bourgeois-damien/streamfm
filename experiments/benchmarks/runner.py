@@ -1,3 +1,11 @@
+"""In-process benchmark driver.
+
+Resolves the streaming config, optionally applies INT8 PTQ, loads the input
+audio and dispatches to the eager or CUDA Graph loops for the requested
+task/part/execution. ``run_benchmark`` is the entry point shared by the local
+CLI and the Modal functions.
+"""
+
 from __future__ import annotations
 
 import json

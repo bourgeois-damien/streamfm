@@ -1,3 +1,9 @@
+"""Modal entrypoints that run test-set eval on remote GPUs.
+
+One function per hardware target (CPU/T4/L4/L40S/A100); each runs the eval on
+Modal and returns the enhanced audio and metrics. Invoked via ``modal run``.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path

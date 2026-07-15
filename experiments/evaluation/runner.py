@@ -1,3 +1,10 @@
+"""In-process test-set inference driver.
+
+Composes the Hydra config, instantiates and checkpoints the model, sets up the
+requested split, applies the execution mode and enhances each selected file.
+``run_test_set_inference`` is the entry point shared by the CLI and Modal.
+"""
+
 from __future__ import annotations
 
 import contextlib

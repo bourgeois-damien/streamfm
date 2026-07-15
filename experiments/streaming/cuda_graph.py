@@ -1,3 +1,10 @@
+"""CUDA Graph streaming pipelines.
+
+Streaming audio loops that replay a captured graph of the model (plus a
+TensorRT + CUDA Graph variant), used to measure per-frame latency without
+launch overhead.
+"""
+
 from __future__ import annotations
 
 import time

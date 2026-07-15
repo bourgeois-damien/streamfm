@@ -1,3 +1,9 @@
+"""Provision the training/eval datasets on the Modal volume.
+
+Downloads and extracts the EARS-WHAM sources (and the official recipe assets),
+installing the reverb dependencies needed to build the derev variant.
+"""
+
 from __future__ import annotations
 
 import json

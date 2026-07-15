@@ -1,3 +1,10 @@
+"""From-scratch speech-enhancement baseline for Stream.FM.
+
+Loads the SE model from its Hydra config and checkpoint and runs a plain
+streaming forward loop with per-step timing. This is the reference point the
+optimized benchmark and eval paths are measured against.
+"""
+
 from __future__ import annotations
 
 import json

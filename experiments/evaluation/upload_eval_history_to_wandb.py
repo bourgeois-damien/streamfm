@@ -1,3 +1,9 @@
+"""Backfill W&B from saved eval history.
+
+Loads existing eval history rows with their score results and uploads them to
+Weights & Biases after the fact.
+"""
+
 from __future__ import annotations
 
 import argparse

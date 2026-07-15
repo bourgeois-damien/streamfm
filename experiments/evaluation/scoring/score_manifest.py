@@ -1,3 +1,10 @@
+"""Score an eval manifest against clean references.
+
+Aligns each enhanced/clean pair and computes PESQ, ESTOI, SI-SDR, LSD and PSNR,
+with a phaseless variant. Runs locally or dispatches to Modal, and can emit
+per-file scores for the subset-convergence analysis.
+"""
+
 from __future__ import annotations
 
 import argparse

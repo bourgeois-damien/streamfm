@@ -1,3 +1,9 @@
+"""Benchmark CLI option parsing and normalization.
+
+Turns the raw task/part/execution/dtype/steps arguments into the canonical
+forms the runner expects (``SUPPORTED_TASKS``, ``FLOW_TASKS``).
+"""
+
 from __future__ import annotations
 
 FLOW_TASKS = {"stftpr", "bwe", "derev", "lyra"}
