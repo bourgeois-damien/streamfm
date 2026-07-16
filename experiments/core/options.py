@@ -36,8 +36,8 @@ def normalize_cli_options(
         raise ValueError("Unsupported part. Use 'model', 'predictor', or 'flow'.")
     if requested_pipeline not in {"model_only", "audio"}:
         raise ValueError("Unsupported pipeline. Use 'model_only' or 'audio'.")
-    if requested_execution not in {"eager", "compiled", "cuda_graph", "tensorrt", "tensorrt_int8"}:
-        raise ValueError("Unsupported execution. Use eager, compiled, cuda_graph, tensorrt, or tensorrt_int8.")
+    if requested_execution not in {"eager", "compiled", "cuda_graph", "tensorrt", "tensorrt_cuda_graph"}:
+        raise ValueError("Unsupported execution. Use eager, compiled, cuda_graph, tensorrt, or tensorrt_cuda_graph.")
 
     # Flow-only tasks (stftpr/bwe/...) have a single DNN, so part=model and
     # part=flow are the same thing; only SE splits into predictor + flow.
@@ -67,8 +67,8 @@ def normalize_cli_options(
         "internal_task": internal_task,
         "internal_pipeline": internal_pipeline,
         "use_compiled": requested_execution in {"compiled", "cuda_graph"},
-        "use_tensorrt": requested_execution in {"tensorrt", "tensorrt_int8"},
-        "tensorrt_precision": "int8" if requested_execution == "tensorrt_int8" else "fp16",
+        "use_tensorrt": requested_execution in {"tensorrt", "tensorrt_cuda_graph"},
+        "tensorrt_cuda_graph": requested_execution == "tensorrt_cuda_graph",
     }
 
 

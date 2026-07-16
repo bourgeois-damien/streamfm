@@ -342,8 +342,6 @@ def _benchmark_flow_task(
     for row in results:
         row["task"] = task
         if trt_validation is not None:
-            row["execution"] = "tensorrt"
-            row["execution"] = f"tensorrt_{tensorrt_precision}" if tensorrt_precision == "int8" else "tensorrt"
             row["tensorrt_streaming"] = True
             row.update({f"tensorrt_{key}": value for key, value in trt_validation.items()})
             row.update({f"tensorrt_{key}": value for key, value in trt_runtime_profile.items()})
@@ -799,7 +797,6 @@ def run_benchmark(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
-    tensorrt_cuda_graph: bool = False,
 ) -> list[dict]:
     """Run one benchmark end to end; the single entry point shared by local CLI and Modal.
 
@@ -817,17 +814,14 @@ def run_benchmark(
     model_memory_format = normalize_model_memory_format(model_memory_format)
     float32_matmul_precision = normalize_float32_matmul_precision(float32_matmul_precision)
 
-    if execution in {"cuda_graph", "tensorrt", "tensorrt_int8"} and device.type != "cuda":
+    if execution in {"cuda_graph", "tensorrt", "tensorrt_cuda_graph"} and device.type != "cuda":
         raise ValueError(f"execution={execution} requires a CUDA device.")
-    trt_int8 = execution == "tensorrt_int8" or (
-        execution == "tensorrt" and ptq_int8.strip().lower() == "tensorrt"
-    )
-    if execution == "tensorrt" and not trt_int8 and model_dtype_name.lower() not in {"fp16", "fp32"}:
+    is_tensorrt = execution in {"tensorrt", "tensorrt_cuda_graph"}
+    trt_int8 = is_tensorrt and ptq_int8.strip().lower() == "tensorrt"
+    if is_tensorrt and not trt_int8 and model_dtype_name.lower() not in {"fp16", "fp32"}:
         raise ValueError("TensorRT requires --dtype fp16 or --dtype fp32.")
     if trt_int8 and model_dtype_name.lower() != "fp32":
         raise ValueError("TensorRT INT8 PTQ requires --dtype fp32 for its model I/O.")
-    if tensorrt_cuda_graph and execution not in {"tensorrt", "tensorrt_int8"}:
-        raise ValueError("--tensorrt-cuda-graph requires --execution tensorrt.")
 
     # 2) Process-level setup. chdir to the repo root because checkpoint/config
     # loading uses relative paths; matmul precision trades fp32 accuracy for
@@ -878,7 +872,7 @@ def run_benchmark(
                 if trt_int8
                 else ("fp32" if model_dtype_name.lower() == "fp32" else "fp16")
             ),
-            tensorrt_cuda_graph=tensorrt_cuda_graph,
+            tensorrt_cuda_graph=resolved["tensorrt_cuda_graph"],
             model_dtype_name=model_dtype_name,
             device=device,
             paths=paths,

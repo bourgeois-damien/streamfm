@@ -270,7 +270,7 @@ def run_streaming_audio_pipeline_with_tensorrt_cuda_graph(
     assert audio.ndim == 2 and audio.shape[0] == 1, "Expected mono audio shaped [1, T]."
     assert steps > 0
     if not getattr(flow, "use_cuda_graph", False):
-        raise ValueError("TensorRT audio graph requires --tensorrt-cuda-graph.")
+        raise ValueError("TensorRT audio graph requires --execution tensorrt_cuda_graph.")
 
     torch.manual_seed(seed)
     audio = audio.to(device)

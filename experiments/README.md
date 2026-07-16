@@ -307,9 +307,9 @@ Puis lancer la grille avec un nom stable, qui permet aussi de reprendre les essa
 
 Les variantes nommées (`baseline`, `quant_int8`, `svd_50`, etc.) se définissent dans `presets`. Chaque preset peut choisir son `config_name`, son `ckpt` et une liste de `config_overrides`. Les paramètres inconnus sont refusés afin d'éviter qu'une option de compression soit seulement journalisée sans être réellement appliquée au modèle.
 
-### PTQ INT8 (benchmark CPU)
+### PTQ INT8
 
-Post-training INT8 est branché sur les benchmarks via `--ptq-int8` (composants séparés par des virgules) :
+Post-training INT8 est branché sur les benchmarks via `--ptq-int8`. Côté CPU (quantization native PyTorch, composants séparés par des virgules) :
 
 - `linear` — dynamic INT8 sur les `nn.Linear`
 - `conv` — static INT8 sur les `nn.Conv2d` plaines (ex. depthwise/pointwise après SVD)
@@ -323,6 +323,16 @@ python experiments/benchmarks/streamfm_benchmark.py --local --hardware cpu \
   --task stftpr --pipeline audio --execution eager --dtype fp32 \
   --ptq-int8 causal_conv --ptq-calib-steps 32 \
   --num-threads 1 --num-interop-threads 1
+```
+
+Côté GPU, l'INT8 passe par TensorRT (calibration ModelOpt) : `--ptq-int8 tensorrt`
+avec `--execution tensorrt` ou `tensorrt_cuda_graph`, et `--dtype fp32` (les
+entrées/sorties du moteur restent en fp32). Exemple :
+
+```bash
+python experiments/benchmarks/streamfm_benchmark.py --hardware l4 \
+  --task stftpr --pipeline model_only --execution tensorrt_cuda_graph \
+  --dtype fp32 --ptq-int8 tensorrt --ptq-calib-steps 32
 ```
 
 Grille de smoke :

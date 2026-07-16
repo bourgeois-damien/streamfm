@@ -128,6 +128,10 @@ def _target_command(
     --backend local because the benchmark process already runs inside the
     Modal container; the profiler wraps it there.
     """
+    # cuda_graph is a capture-tool axis here; on the benchmark CLI the TensorRT
+    # graph mode is spelled as its own execution value.
+    if cuda_graph and execution == "tensorrt":
+        execution = "tensorrt_cuda_graph"
     target = [
         sys.executable,
         "-m",
@@ -158,8 +162,6 @@ def _target_command(
     ]
     if ptq_int8:
         target.extend(["--ptq-int8", "tensorrt", "--ptq-calib-steps", "32"])
-    if cuda_graph:
-        target.append("--tensorrt-cuda-graph")
     return target
 
 
@@ -450,8 +452,13 @@ def main(
     """Dispatch one capture to the right Modal function, then download its artifacts locally."""
     if tool not in {"nsys", "ncu", "torch"}:
         raise ValueError("tool must be nsys, ncu, or torch.")
+    if execution == "tensorrt_cuda_graph":
+        # Same run as execution=tensorrt + cuda_graph=True; keep the split
+        # form internally so run ids and metadata stay consistent.
+        execution = "tensorrt"
+        cuda_graph = True
     if execution not in {"tensorrt", "cuda_graph"}:
-        raise ValueError("Nsight capture currently supports execution=tensorrt or cuda_graph.")
+        raise ValueError("Nsight capture currently supports execution=tensorrt, tensorrt_cuda_graph, or cuda_graph.")
     if dtype not in {"fp32", "fp16"}:
         raise ValueError("Nsight capture supports dtype=fp32 or fp16.")
     if ptq_int8 and execution != "tensorrt":
@@ -459,8 +466,9 @@ def main(
     if ptq_int8 and dtype != "fp32":
         raise ValueError("TensorRT INT8 profiling uses dtype=fp32 I/O.")
     if execution == "cuda_graph" and cuda_graph:
-        # Native PyTorch CUDA Graph is selected by execution itself.  The
-        # TensorRT-only flag must not be forwarded.
+        # Native PyTorch CUDA Graph is selected by execution itself; the
+        # cuda_graph axis only applies to TensorRT runs, where the target
+        # command maps it to --execution tensorrt_cuda_graph.
         cuda_graph = False
 
     precision = "int8" if ptq_int8 else dtype

@@ -284,7 +284,6 @@ def _run_modal_benchmark(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
-    tensorrt_cuda_graph: bool = False,
     float32_matmul_precision: str = "high",
 ) -> list[dict]:
     """Run one benchmark inside Modal on CPU or CUDA."""
@@ -331,7 +330,6 @@ def _run_modal_benchmark(
         checkpoint_name=checkpoint_name,
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
-        tensorrt_cuda_graph=tensorrt_cuda_graph,
     )
     # For normal benchmark runs the payload is metadata only.  Round-trip it
     # through JSON so a lightweight local Modal CLI need not have PyTorch just
@@ -346,7 +344,7 @@ def _run_modal_benchmark(
 # decorator at definition time, so the tiers cannot share a single function.
 # MODAL_FUNCTIONS below maps the hardware name back to the right one.
 @app.function(timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
-def benchmark_cpu(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, tensorrt_cuda_graph: bool = False, float32_matmul_precision: str = "high"):
+def benchmark_cpu(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high"):
     """Run the selected benchmark on Modal CPU."""
     return _run_modal_benchmark(
         hardware="CPU",
@@ -370,13 +368,12 @@ def benchmark_cpu(task: str, part: str, pipeline: str, execution: str, steps: st
         checkpoint_name=checkpoint_name,
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
-        tensorrt_cuda_graph=tensorrt_cuda_graph,
         float32_matmul_precision=float32_matmul_precision,
     )
 
 
 @app.function(gpu="T4", timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
-def benchmark_t4(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, tensorrt_cuda_graph: bool = False, float32_matmul_precision: str = "high"):
+def benchmark_t4(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high"):
     """Run the selected benchmark on an NVIDIA T4."""
     return _run_modal_benchmark(
         hardware="T4",
@@ -400,13 +397,12 @@ def benchmark_t4(task: str, part: str, pipeline: str, execution: str, steps: str
         checkpoint_name=checkpoint_name,
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
-        tensorrt_cuda_graph=tensorrt_cuda_graph,
         float32_matmul_precision=float32_matmul_precision,
     )
 
 
 @app.function(gpu="L4", timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
-def benchmark_l4(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, tensorrt_cuda_graph: bool = False, float32_matmul_precision: str = "high"):
+def benchmark_l4(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high"):
     """Run the selected benchmark on an NVIDIA L4."""
     return _run_modal_benchmark(
         hardware="L4",
@@ -430,13 +426,12 @@ def benchmark_l4(task: str, part: str, pipeline: str, execution: str, steps: str
         checkpoint_name=checkpoint_name,
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
-        tensorrt_cuda_graph=tensorrt_cuda_graph,
         float32_matmul_precision=float32_matmul_precision,
     )
 
 
 @app.function(gpu="L40S", timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
-def benchmark_l40s(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, tensorrt_cuda_graph: bool = False, float32_matmul_precision: str = "high"):
+def benchmark_l40s(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high"):
     """Run the selected benchmark on an NVIDIA L40S."""
     return _run_modal_benchmark(
         hardware="L40S",
@@ -460,13 +455,12 @@ def benchmark_l40s(task: str, part: str, pipeline: str, execution: str, steps: s
         checkpoint_name=checkpoint_name,
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
-        tensorrt_cuda_graph=tensorrt_cuda_graph,
         float32_matmul_precision=float32_matmul_precision,
     )
 
 
 @app.function(gpu="A100", timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
-def benchmark_a100(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, tensorrt_cuda_graph: bool = False, float32_matmul_precision: str = "high"):
+def benchmark_a100(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high"):
     """Run the selected benchmark on an NVIDIA A100."""
     return _run_modal_benchmark(
         hardware="A100",
@@ -490,7 +484,6 @@ def benchmark_a100(task: str, part: str, pipeline: str, execution: str, steps: s
         checkpoint_name=checkpoint_name,
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
-        tensorrt_cuda_graph=tensorrt_cuda_graph,
         float32_matmul_precision=float32_matmul_precision,
     )
 
@@ -529,7 +522,6 @@ def _trial_to_benchmark_call(trial: dict) -> dict:
         "checkpoint_name": str(trial.get("ckpt", trial.get("checkpoint", ""))),
         "ptq_int8": str(trial.get("ptq_int8", "")),
         "ptq_calib_steps": int(trial.get("ptq_calib_steps", 32)),
-        "tensorrt_cuda_graph": bool(trial.get("tensorrt_cuda_graph", False)),
         "float32_matmul_precision": str(trial.get("matmul_precision", "high")),
     }
 
@@ -668,7 +660,6 @@ def main(
     memory_format: str = "contiguous",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
-    tensorrt_cuda_graph: bool = False,
     output_json: str = "",
     history_json: str = "",
     save_audio: bool = False,
@@ -728,7 +719,6 @@ def main(
         checkpoint_name=ckpt,
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
-        tensorrt_cuda_graph=tensorrt_cuda_graph,
         float32_matmul_precision=matmul_precision,
     )
 
@@ -783,7 +773,6 @@ def main(
             "preallocate_model_buffers": preallocate_model_buffers,
             "ptq_int8": ptq_int8,
             "ptq_calib_steps": ptq_calib_steps,
-            "tensorrt_cuda_graph": tensorrt_cuda_graph,
             "save_audio": save_audio,
             "audio_output_dir": audio_output_dir,
             "input_audio": input_audio_path,
