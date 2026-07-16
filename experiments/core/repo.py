@@ -6,7 +6,12 @@ from pathlib import Path
 
 
 def find_repo_root(start: Path | None = None) -> Path:
-    """Find the repository root by looking for the Stream.FM source layout."""
+    """Find the repository root by looking for the Stream.FM source layout.
+
+    Walks upward until a directory contains both ``config/`` and ``sgmse/``
+    (only the repo root has both), so scripts work no matter which directory
+    they are launched from. Falls back to the starting directory's parent.
+    """
     current = (start or Path(__file__)).resolve()
     for candidate in (current.parent, *current.parents):
         if (candidate / "config").is_dir() and (candidate / "sgmse").is_dir():

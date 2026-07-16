@@ -41,10 +41,12 @@ def sweep_config_get(config: Any, key: str, default: Any) -> Any:
 
 
 def _default_audio_hop_s(task: str) -> float:
+    """Frame hop in seconds (lyra 20 ms, everything else 16 ms); twin of streamfm_benchmark's."""
     return 0.020 if task.lower().replace("-", "_") == "lyra" else 0.016
 
 
 def _input_audio_duration_s(input_audio_path: str) -> float:
+    """Clip duration in seconds from torchaudio metadata (no decode)."""
     import torchaudio
 
     info = torchaudio.info(input_audio_path)
@@ -69,6 +71,8 @@ def resolve_sweep_iterations(command: dict[str, Any], *, input_audio_path: str) 
     if audio_duration_s > 0:
         return max(1, math.ceil(audio_duration_s / _default_audio_hop_s(task)))
     if iterations == -1:
+        # Whole-file mode: warmup frames consume the head of the same file,
+        # so subtract them to keep measured frames within the audio that exists.
         duration_s = _input_audio_duration_s(input_audio_path) if input_audio_path else 10.0
         warmup = int(command["warmup"])
         return max(1, math.ceil(duration_s / _default_audio_hop_s(task)) - max(warmup, 0))
@@ -131,6 +135,7 @@ def build_sweep_command(
 
 
 def _resolve_input_audio_path(input_audio: str, *, pipeline: str) -> str:
+    """Resolve the clip path for audio trials: a missing default falls back to synthetic input (""); an explicit path must exist."""
     if pipeline.lower().replace("-", "_") != "audio":
         return ""
     requested = input_audio.strip()
@@ -173,6 +178,8 @@ def log_sweep_results_to_run(
     for row_idx, record in enumerate(records):
         if record["metrics"]:
             wandb.log(record["metrics"], step=row_idx)
+        # The sweep controller optimizes on summary values, so mirror the
+        # primary row's metrics there.
         if wandb.run is not None and row_idx == 0:
             wandb.run.summary.update(
                 {f"summary/{key}": value for key, value in record["metrics"].items()}
@@ -184,6 +191,7 @@ def log_sweep_results_to_run(
 
 
 def _run_benchmark_local(command: dict[str, Any], *, input_audio_path: str) -> list[dict]:
+    """Run the trial in-process through run_benchmark on local hardware."""
     hardware = str(command["hardware"])
     device = select_torch_device(hardware)
     if command["execution"].replace("-", "_").lower() == "cuda_graph" and device.type != "cuda":
@@ -224,6 +232,11 @@ def _run_benchmark_local(command: dict[str, Any], *, input_audio_path: str) -> l
 
 
 def _run_benchmark_modal(command: dict[str, Any], *, input_audio_path: str, output_json: Path) -> list[dict]:
+    """Run the trial through a `modal run` subprocess and read results back from output_json.
+
+    Same round-trip as streamfm_benchmark._run_modal: the Modal CLI owns app
+    setup, and the JSON file carries the rows back without importing torch here.
+    """
     modal_script = REPO_ROOT / "experiments/benchmarks/modal_streamfm_benchmark.py"
     hardware = normalize_modal_hardware(str(command["hardware"]))
     modal_command = [
@@ -283,6 +296,8 @@ def _run_benchmark_modal(command: dict[str, Any], *, input_audio_path: str, outp
     results = json.loads(output_json.read_text(encoding="utf-8"))
     if not isinstance(results, list):
         raise ValueError(f"Expected Modal benchmark output to be a JSON list: {output_json}")
+    # Record the normalized GPU tier and backend so downstream logging matches
+    # what actually ran, not what the sweep config requested.
     command["hardware"] = hardware
     command["backend"] = "modal"
     return results
@@ -337,6 +352,9 @@ def run_sweep_trial(
         run_id=run_id,
         run_started_at=run_started_at,
     )
+    # History still gets the rows; wandb_enabled=False because the metrics were
+    # already logged onto the live sweep run above — a fresh run per row would
+    # detach them from the sweep.
     record_benchmark_results(
         results=results,
         command=command,

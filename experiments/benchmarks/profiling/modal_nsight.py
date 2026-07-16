@@ -101,6 +101,7 @@ app = modal.App("streamfm-nsight", image=image)
 
 
 def _run_checked(command: list[str], *, env: dict[str, str], cwd: str) -> subprocess.CompletedProcess:
+    """Run a subprocess capturing merged stdout/stderr; never raises — exit codes land in the run metadata."""
     return subprocess.run(
         command,
         cwd=cwd,
@@ -122,6 +123,11 @@ def _target_command(
     warmup: int,
     memory_format: str,
 ) -> list[str]:
+    """Build the streamfm_benchmark CLI invocation that every capture tool below profiles.
+
+    --backend local because the benchmark process already runs inside the
+    Modal container; the profiler wraps it there.
+    """
     target = [
         sys.executable,
         "-m",
@@ -171,6 +177,12 @@ def capture_nsys(
     require_full_compilation: bool,
     run_id: str,
 ) -> dict:
+    """Run the benchmark under Nsight Systems on an L4 and store the artifacts on the volume.
+
+    STREAMFM_CUDA_PROFILE_FRAMES opens the cudaProfilerApi capture window (see
+    benchmarks/cuda_profile_range.py), so the trace covers only a few measured
+    frames instead of model load, TensorRT compilation and warmup.
+    """
     output_dir = Path(PROFILE_ROOT) / run_id
     output_dir.mkdir(parents=True, exist_ok=False)
     report_base = output_dir / "streamfm"
@@ -212,6 +224,8 @@ def capture_nsys(
     status = _run_checked(["nsys", "status", "-e"], env=env, cwd=REMOTE_ROOT)
     (output_dir / "nsys_status.txt").write_text(status.stdout, encoding="utf-8")
 
+    # Pre-render the standard stats tables to text so the results are readable
+    # without downloading the report into the Nsight GUI.
     reports = (
         "cuda_api_sum",
         "cuda_gpu_kern_sum",
@@ -277,6 +291,12 @@ def capture_ncu(
     launch_skip: int,
     launch_count: int,
 ) -> dict:
+    """Run the benchmark under Nsight Compute for per-kernel hardware metrics.
+
+    --profile-from-start off defers to the same cudaProfilerApi window as nsys;
+    launch-skip/launch-count then select which kernel launches inside that
+    window get replayed and measured.
+    """
     output_dir = Path(PROFILE_ROOT) / run_id
     output_dir.mkdir(parents=True, exist_ok=False)
     report_base = output_dir / "streamfm"
@@ -363,6 +383,11 @@ def capture_torch_trace(
     require_full_compilation: bool,
     run_id: str,
 ) -> dict:
+    """Run the benchmark with the torch profiler exporting a Perfetto/Chrome trace; no Nsight involved.
+
+    STREAMFM_CUDA_PROFILE_FRAMES stays 0 so the CUDA profiler window is never
+    opened — only the torch-profiler switch is armed.
+    """
     output_dir = Path(PROFILE_ROOT) / run_id
     output_dir.mkdir(parents=True, exist_ok=False)
     trace_path = output_dir / "streamfm_perfetto_trace.json.gz"
@@ -422,6 +447,7 @@ def main(
     launch_skip: int = 0,
     launch_count: int = 1,
 ):
+    """Dispatch one capture to the right Modal function, then download its artifacts locally."""
     if tool not in {"nsys", "ncu", "torch"}:
         raise ValueError("tool must be nsys, ncu, or torch.")
     if execution not in {"tensorrt", "cuda_graph"}:

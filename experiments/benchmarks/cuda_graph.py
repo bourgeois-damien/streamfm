@@ -30,7 +30,13 @@ def benchmark_flow_steps_cuda_graph(
     freq_bins: int = 256,
     frame_budget_ms: float = 16.0,
 ) -> list[dict]:
-    """Benchmark a flow model loop using CUDA Graph replay."""
+    """Time the flow DNN per frame with the whole Euler solver captured as one CUDA Graph.
+
+    Model-only counterpart of the streaming graph pipeline: one graph.replay()
+    per frame replaces steps x (many kernel launches). Reports three regimes:
+    per-frame latency (synced every frame), host-side submit cost, and
+    batched throughput without intermediate syncs.
+    """
     import torch
 
     from experiments.benchmarks.cuda_profile_range import CudaProfileRange
@@ -41,10 +47,14 @@ def benchmark_flow_steps_cuda_graph(
     flow = model.eval()
     results = []
 
+    # Rebound per steps value inside the loop below; the closure reads them so
+    # run_solver only ever touches fixed-address buffers (a capture requirement).
     static_x_t = None
     static_dnn_input = None
 
     def run_solver(y_frame, flow_states, t_tensors, steps):
+        # Euler solver on static buffers only: x_0 = y, x += v/steps per step,
+        # one recurrent state per solver step.
         static_x_t.copy_(y_frame)
         for step_idx in range(steps):
             pack_ri_channels(static_x_t, y_frame, out=static_dnn_input)
@@ -69,6 +79,10 @@ def benchmark_flow_steps_cuda_graph(
         flow_states = [prepare_streaming_state(flow) for _ in range(steps)]
 
         with torch.inference_mode():
+            # Warmup BEFORE capture (cuDNN autotune, lazy allocations), then
+            # zero the states in place so the capture starts from silence
+            # without moving any address. Same discipline as the streaming
+            # graph pipeline in experiments/streaming/cuda_graph.py.
             for _ in range(3):
                 static_output.copy_(run_solver(static_y_frame, flow_states, t_tensors, steps))
             torch.cuda.synchronize()
@@ -85,6 +99,9 @@ def benchmark_flow_steps_cuda_graph(
                 graph.replay()
             torch.cuda.synchronize()
 
+            # Pass 1 — per-frame latency. CUDA events time the GPU work and
+            # end_event.synchronize() closes each frame, so every sample in
+            # times_ms is an individually valid frame latency.
             times_ms = []
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
@@ -114,6 +131,8 @@ def benchmark_flow_steps_cuda_graph(
             for state in flow_states:
                 zero_streaming_state(flow, state)
             torch.cuda.synchronize()
+            # Pass 2 — submit cost on an idle queue: sync before every frame so
+            # the timers see pure host-side enqueue time (us), no GPU backlog.
             idle_copy_submit_us = []
             idle_graph_submit_us = []
             for measured_idx in range(iterations):
@@ -126,6 +145,9 @@ def benchmark_flow_steps_cuda_graph(
                 idle_graph_submit_us.append((time.perf_counter() - cpu_start) * 1_000_000.0)
             torch.cuda.synchronize()
 
+            # Pass 3 — batched throughput: no sync inside the loop, the GPU
+            # pipelines frames back-to-back; the event pair around the whole
+            # batch gives amortized ms per frame.
             submit_us = []
             batch_start = torch.cuda.Event(enable_timing=True)
             batch_end = torch.cuda.Event(enable_timing=True)
@@ -174,7 +196,11 @@ def benchmark_flow_steps_cuda_graph(
 
 
 def benchmark_se_predictor_cuda_graph(predictor, device, iterations, warmup, use_compiled, dtype, model_memory_format: str = "contiguous") -> list[dict]:
-    """Benchmark the SE initial predictor DNN using CUDA Graph replay."""
+    """Time the SE predictor under CUDA Graph replay: one captured DNN call per frame.
+
+    Same capture/replay/timing discipline as benchmark_flow_steps_cuda_graph
+    above (see comments there); only the latency pass is run here.
+    """
     import torch
 
     if device.type != "cuda":
@@ -245,7 +271,12 @@ def benchmark_se_predictor_cuda_graph(predictor, device, iterations, warmup, use
 
 
 def benchmark_se_flow_cuda_graph(flow, device, steps_list, iterations, warmup, use_compiled, dtype, sigma_e=0.05, model_memory_format: str = "contiguous") -> list[dict]:
-    """Benchmark the SE generative flow DNN loop using CUDA Graph replay."""
+    """Time the SE flow solver under CUDA Graph replay, predictor skipped.
+
+    Same discipline as benchmark_flow_steps_cuda_graph above (see comments
+    there); differences: x_0 = e + sigma_e*noise and the 6-channel input
+    (x_t, e, y), so three static frames are copied in per replay.
+    """
     import torch
 
     if device.type != "cuda":
@@ -349,7 +380,12 @@ def benchmark_se_flow_cuda_graph(flow, device, steps_list, iterations, warmup, u
 
 
 def benchmark_se_full_cuda_graph(predictor, flow, device, steps_list, iterations, warmup, use_compiled, dtype, sigma_e=0.05, model_memory_format: str = "contiguous") -> list[dict]:
-    """Benchmark the SE predictor plus flow solver using CUDA Graph replay."""
+    """Time the full SE chain (predictor + flow, 1 + steps DNN calls) as one captured graph.
+
+    Same discipline as benchmark_flow_steps_cuda_graph above (see comments
+    there); the predictor output e feeds the solver inside the same graph, so
+    a single replay covers the whole per-frame chain.
+    """
     import torch
 
     if device.type != "cuda":

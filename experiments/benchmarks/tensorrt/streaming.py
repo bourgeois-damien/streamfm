@@ -14,6 +14,12 @@ from typing import Any
 
 
 def _flatten_tensor_state(value: Any) -> list:
+    """Flatten the nested streaming-state structure into an ordered tensor list.
+
+    The TensorRT engine signature is a flat list of tensors, so the nested
+    state (lists of lists per causal conv) must round-trip through
+    flatten/unflatten in a stable order.
+    """
     import torch
 
     if isinstance(value, torch.Tensor):
@@ -26,6 +32,7 @@ def _flatten_tensor_state(value: Any) -> list:
 
 
 def _unflatten_tensor_state(template: Any, values) -> Any:
+    """Rebuild the nested state structure from a flat tensor iterator (inverse of _flatten_tensor_state)."""
     import torch
 
     if isinstance(template, torch.Tensor):
@@ -49,6 +56,12 @@ def _enable_functional_state_updates(model) -> None:
 
 
 def _make_step_module(model, state_template):
+    """Wrap the model as a pure module: (x, t, *flat_state) -> (y, *flat_next_state).
+
+    torch.export and TensorRT need a stateless callable with only tensors in
+    the signature; __wrapped__ bypasses the torch.compile decorator on
+    forward_step (same trick as core/streaming_state.py).
+    """
     import torch
 
     raw_step = getattr(type(model).forward_step, "__wrapped__", None)
@@ -124,6 +137,7 @@ class TensorRTStreamingAdapter:
     ):
         import torch
 
+        # 1) Validate the precision/dtype pairing before any expensive work.
         if not torch.cuda.is_available():
             raise ValueError("TensorRT streaming requires CUDA.")
         if precision not in {"fp32", "fp16", "int8"}:
@@ -145,6 +159,8 @@ class TensorRTStreamingAdapter:
                 "TensorRT streaming requires torch-tensorrt in the benchmark environment."
             ) from exc
 
+        # 2) Prepare the model: functional (non-mutating) state updates so
+        # torch.export can trace it, then optional INT8 Q/DQ calibration.
         self.model = model.eval().requires_grad_(False)
         _enable_functional_state_updates(self.model)
         self.precision = precision
@@ -161,6 +177,7 @@ class TensorRTStreamingAdapter:
                 calibration_steps=calibration_steps,
             ).eval().requires_grad_(False)
             _preserve_modelopt_amax_buffers_for_export()
+        # 3) Build the pure step module and example inputs for export.
         self._template = self.model.init_state()
         self._initial_state = tuple(_flatten_tensor_state(self._template))
         self._step = _make_step_module(self.model, self._template)
@@ -172,8 +189,8 @@ class TensorRTStreamingAdapter:
         ).contiguous(memory_format=torch_memory_format)
         time_cond = torch.full((1,), 0.5, device="cuda", dtype=dtype)
 
-        # Export before TensorRT compilation: it fixes the 63-state signature
-        # and makes every state transition visible to the engine compiler.
+        # 4) Export before TensorRT compilation: it fixes the 63-state
+        # signature and makes every state transition visible to the compiler.
         if precision == "int8":
             from modelopt.torch.quantization.utils import export_torch_mode
 
@@ -201,6 +218,9 @@ class TensorRTStreamingAdapter:
             # Omit enabled_precisions for FP32: TensorRT's default is its
             # native FP32 path, without allowing FP16 tactics implicitly.
             self.engine = torch_tensorrt.dynamo.compile(program, **compile_kwargs)
+        # 5) Self-diagnostics recorded at build time: partition inventory,
+        # engine-vs-eager agreement and micro-profiles all land in the
+        # benchmark rows so a bad build is visible in the history.
         self.compilation_profile = self._inspect_compiled_engine()
         # ``use_cuda_graph`` deliberately does *not* enable Torch-TensorRT's
         # engine-only CUDA-graph wrapper here.  The benchmark captures a
@@ -243,6 +263,7 @@ class TensorRTStreamingAdapter:
         }
 
     def _validate_one_step(self, x, time_cond) -> dict[str, float]:
+        """Compare one engine step against the exported PyTorch step (output and every state tensor)."""
         import torch
 
         with torch.inference_mode():
@@ -560,6 +581,9 @@ def benchmark_tensorrt_flow_steps_cuda_graph(
                 graph.replay()
             torch.cuda.synchronize()
 
+            # Same three timing regimes as benchmark_flow_steps_cuda_graph in
+            # benchmarks/cuda_graph.py (see comments there): per-frame latency,
+            # idle-queue submit cost, batched throughput.
             times_ms = []
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)

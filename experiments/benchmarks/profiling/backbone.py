@@ -25,6 +25,7 @@ from sgmse.backbones.streaming_unet import CausalConv2d, CausalDecoupledConv2d, 
 
 
 def _inventory(dnn: torch.nn.Module) -> dict[str, Any]:
+    """Count and size the backbone's conv/linear/norm layers, grouped by kernel shape."""
     conv3x3 = []
     conv1x1 = []
     other_conv = []
@@ -85,7 +86,12 @@ def _inventory(dnn: torch.nn.Module) -> dict[str, Any]:
 
 
 def _install_stage_labels(dnn: CausalNCSNpp):
-    """Wrap uncompiled forward_step with named profiler regions."""
+    """Wrap uncompiled forward_step with named profiler regions.
+
+    The body below is a copy of CausalNCSNpp.forward_step (see
+    sgmse/backbones/streaming_unet.py) with record_function ranges around each
+    stage; it must be kept in sync if the backbone changes.
+    """
     raw = getattr(dnn.forward_step, "__wrapped__", None)
     if raw is None:
         raise RuntimeError("Expected @torch.compile-wrapped forward_step with __wrapped__.")
@@ -255,6 +261,7 @@ def _install_module_labels(dnn: torch.nn.Module):
 
 
 def _restore_module_labels(originals: list[tuple[torch.nn.Module, str, Any]]) -> None:
+    """Undo _install_module_labels so the model is usable after profiling."""
     for module, attribute, original in originals:
         setattr(module, attribute, original)
 
@@ -293,6 +300,7 @@ def _linear_macs(entry: dict[str, Any]) -> int | None:
 
 
 def _parse_profiler_table(prof: profile) -> list[dict[str, Any]]:
+    """Flatten key_averages() into plain dict rows (self/total us on CPU and CUDA)."""
     rows = []
     for evt in prof.key_averages():
         rows.append(
@@ -323,6 +331,8 @@ def run_backbone_profile(
     gpu_name: str = "",
 ) -> dict[str, Any]:
     """Profile CausalNCSNpp streaming forward_step; return a JSON-serializable report."""
+    # 1) Process setup and model load. CPU thread pinning must happen before
+    # any op runs (torch rejects late interop changes, hence the try/except).
     if device == "cpu":
         if num_interop_threads > 0:
             try:
@@ -347,18 +357,24 @@ def run_backbone_profile(
     if not gpu_name and torch_device.type == "cuda":
         gpu_name = torch.cuda.get_device_name(torch_device)
 
+    # 2) Instrument: stage ranges on the forward_step copy, per-module ranges
+    # on every conv/linear.
     inventory = _inventory(dnn)
     _install_stage_labels(dnn)
     module_label_originals, module_metadata = _install_module_labels(dnn)
 
     freq = freq_bins
     in_ch = int(getattr(dnn, "input_channels", 4))
+    # [B, C_in, F, T=1] — a single streaming frame.
     y = torch.randn(1, in_ch, freq, 1, device=torch_device, dtype=dtype)
     if memory_format == "channels_last":
         y = y.contiguous(memory_format=torch.channels_last)
     t = torch.rand(1, device=torch_device, dtype=dtype)
     state = prepare_streaming_state(dnn)
 
+    # 3) Clean wall-clock pass with no profiler attached: these ms numbers are
+    # the trustworthy ones; the profiled pass below is inflated by
+    # instrumentation and only serves to attribute the time.
     times: list[float] = []
     with torch.inference_mode():
         for _ in range(warmup):
@@ -374,6 +390,8 @@ def run_backbone_profile(
                 torch.cuda.synchronize()
             times.append((time.perf_counter() - start) * 1000.0)
 
+    # 4) Profiled pass: same loop under the torch profiler so time can be
+    # attributed to stages, modules and aten ops.
     activities = [ProfilerActivity.CPU]
     if torch_device.type == "cuda":
         activities.append(ProfilerActivity.CUDA)
@@ -389,6 +407,8 @@ def run_backbone_profile(
     finally:
         _restore_module_labels(module_label_originals)
 
+    # 5) Aggregate. max(cuda, cpu) picks whichever side did the work, so the
+    # same ranking works for GPU and CPU-only runs.
     def _rank(e: dict[str, Any]) -> float:
         return max(e["cuda_self_us"], e["cpu_self_us"])
 
@@ -404,6 +424,8 @@ def run_backbone_profile(
     module_events = {
         e["key"]: e for e in events if e["key"].startswith("module/")
     }
+    # Join profiler events back to the metadata captured at install time
+    # (kernel size, channels, observed shapes) so each row carries its MACs.
     module_ops = []
     for label, metadata in module_metadata.items():
         event = module_events.get(label)

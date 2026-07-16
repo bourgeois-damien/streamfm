@@ -13,6 +13,7 @@ from experiments.core.paths import BenchmarkPaths, checkpoint_path
 from sgmse.util.model_compression import apply_backbone_compression_, get_compression_metadata
 
 
+# task -> (hydra config name, DNN-only checkpoint, full training checkpoint fallback)
 FLOW_TASK_CHECKPOINTS = {
     "stftpr": ("streamfm_stftpr", "streamfm_stftpr_dnn_only.pt", "streamfm_stftpr.ckpt"),
     "bwe": ("streamfm_bwe", "streamfm_bwe_dnn_only.pt", "streamfm_bwe.ckpt"),
@@ -22,6 +23,7 @@ FLOW_TASK_CHECKPOINTS = {
 
 
 def _try_checkpoint_path(filename: str, paths: BenchmarkPaths) -> str | None:
+    """First existing match across the checkpoint roots, or None."""
     for root in paths.checkpoint_roots:
         path = root / filename
         if path.exists():
@@ -30,6 +32,7 @@ def _try_checkpoint_path(filename: str, paths: BenchmarkPaths) -> str | None:
 
 
 def _normalize_checkpoint_state(state):
+    """Unwrap a Lightning-style {"state_dict": ...} container to the bare state dict."""
     if isinstance(state, dict) and "state_dict" in state:
         candidate = state["state_dict"]
         if isinstance(candidate, dict):
@@ -38,6 +41,11 @@ def _normalize_checkpoint_state(state):
 
 
 def _extract_checkpoint_prefix(state_dict: dict, prefix: str) -> dict:
+    """Slice out the sub-module under `prefix.` (keys renamed to drop the prefix).
+
+    Also tries `model.{prefix}` because the Lightning module nesting differs
+    between training setups; raises KeyError if neither prefix matches.
+    """
     prefix = prefix.rstrip(".")
     extracted = {
         key[len(prefix) + 1 :]: value
@@ -74,6 +82,12 @@ def _extract_backbone_state_from_full_checkpoint(checkpoint, prefix: str | None)
 
 
 def _load_backbone_state(*, dnn_checkpoint_name, full_checkpoint_name, paths, state_prefix):
+    """Load DNN weights, preferring the small DNN-only file over the full training checkpoint.
+
+    Returns (state_dict, loaded path, compression metadata). The DNN-only
+    export is a few MB of pure tensors (weights_only=True); the full .ckpt
+    carries pickled training objects and needs weights_only=False.
+    """
     import torch
 
     dnn_path = _try_checkpoint_path(dnn_checkpoint_name, paths)
@@ -125,6 +139,8 @@ def load_backbone_from_checkpoint(
         paths=paths,
         state_prefix=full_checkpoint_state_prefix,
     )
+    # Compression (SVD-factorized layers) rewrites module shapes, so the
+    # architecture must be adapted BEFORE the strict state-dict load.
     apply_backbone_compression_(backbone, compression_metadata, backbone_path=full_checkpoint_state_prefix or "dnn")
     backbone.load_state_dict(backbone_state, strict=True)
     backbone = backbone.eval().to(device=device, dtype=dtype)
@@ -175,7 +191,12 @@ def load_se_flow(device, dtype, paths, checkpoint_name: str | None = None):
 
 
 def load_se_full(device, dtype, paths, checkpoint_name: str | None = None):
-    """Load the full SE model components from the predgen checkpoint."""
+    """Load the full SE chain: predictor + flow + sigma_e from one predgen checkpoint.
+
+    The two DNNs live in the same training checkpoint under different
+    prefixes: 'initial_predictor.*' for the predictor, 'dnn.*' (or
+    'model.dnn.*') for the flow backbone.
+    """
     import torch
     from hydra import compose, initialize_config_dir
     from hydra.utils import instantiate

@@ -46,7 +46,15 @@ def run_streaming_audio_pipeline_with_cuda_graph_model(
     model_memory_format: str = "contiguous",
     return_audio: bool = False,
 ) -> dict:
-    """Run the same pipeline while replaying the model step through CUDA Graph."""
+    """Same pipeline as the eager version, but the whole flow solver is one CUDA Graph replay.
+
+    A CUDA Graph records the solver's kernel sequence once and replays it with
+    a single launch per frame, removing per-kernel CPU launch overhead — the
+    dominant cost for this small model. Constraint: every tensor the graph
+    touches must keep a fixed address, hence the static_* buffers below that
+    per-frame data is copied into. STFT/ISTFT stay outside the graph (their
+    slicing offsets change every frame).
+    """
     assert device.type == "cuda", "CUDA Graph requires a CUDA device."
     assert audio.ndim == 2 and audio.shape[0] == 1, "Expected mono audio shaped [1, T]."
     assert steps > 0
@@ -62,6 +70,9 @@ def run_streaming_audio_pipeline_with_cuda_graph_model(
     if audio.shape[-1] < required_samples:
         audio = torch.nn.functional.pad(audio, (0, required_samples - audio.shape[-1]))
 
+    # Fixed-address I/O buffers for the graph: y and noise are the graph's
+    # inputs (written by copy_ each frame), x_t/dnn_input are solver
+    # scratch, static_output is where the result lands after replay.
     freq_bins = frequency_bins(config)
     static_y_frame = empty_model_tensor((1, 2, freq_bins, 1), device=device, dtype=model_dtype, memory_format=model_memory_format)
     static_noise_frame = torch.empty_like(static_y_frame)
@@ -73,6 +84,8 @@ def run_streaming_audio_pipeline_with_cuda_graph_model(
         torch.full((1,), step_idx / max(steps, 1), device=device, dtype=model_dtype)
         for step_idx in range(steps)
     ]
+    # prepare_streaming_state -> statically allocated recurrent state, so the
+    # state tensors captured into the graph keep stable addresses too.
     flow_states = [prepare_streaming_state(flow) for _ in range(steps)]
 
     def run_solver_with_states(
@@ -109,6 +122,9 @@ def run_streaming_audio_pipeline_with_cuda_graph_model(
     total_times: list[float] = []
 
     with torch.inference_mode():
+        # 1) Warmup BEFORE capture: cuDNN autotuning, lazy allocations and
+        # kernel selection must happen now — anything that allocates during
+        # capture would fail or be baked into the graph.
         static_y_frame.normal_()
         static_noise_frame.normal_()
         for _ in range(3):
@@ -117,11 +133,16 @@ def run_streaming_audio_pipeline_with_cuda_graph_model(
         for state in flow_states:
             zero_streaming_state(flow, state)
 
+        # 2) Capture: record the solver's kernel sequence once.
         graph = torch.cuda.CUDAGraph()
         torch.cuda.synchronize()
         with torch.cuda.graph(graph):
             static_output.copy_(run_solver())
 
+        # 3) Sanity check: replay vs an eager run on identical inputs and
+        # freshly zeroed states. The diff stats go into the summary so a
+        # silently-corrupt capture shows up in the results instead of
+        # producing wrong audio unnoticed.
         check_y_frame = torch.randn_like(static_y_frame)
         check_noise_frame = torch.randn_like(static_noise_frame)
         eager_states = [prepare_streaming_state(flow) for _ in range(steps)]
@@ -144,9 +165,13 @@ def run_streaming_audio_pipeline_with_cuda_graph_model(
         graph_eager_max_abs_diff = float(graph_eager_abs_diff.max().item())
         graph_eager_mean_abs_diff = float(graph_eager_abs_diff.mean().item())
         graph_eager_ref_mean_abs = float(eager_check_output.abs().mean().item())
+        # Zero the states once more: warmup/capture/check polluted the
+        # recurrent state, and the streamed audio must start from silence.
         for state in flow_states:
             zero_streaming_state(flow, state)
 
+        # 4) Frame loop — same structure as the eager pipeline, except the
+        # model stage is now: copy inputs into static buffers + one replay.
         for frame_idx in range(total_frames):
             chunk_start = frame_idx * config.hop_length
             chunk = audio[:, chunk_start:chunk_start + config.hop_length]
@@ -282,6 +307,9 @@ def run_streaming_audio_pipeline_with_tensorrt_cuda_graph(
         static_x_t.add_(static_noise_frame, alpha=config.sigma_y)
         for step_idx in range(steps):
             pack_ri_channels(static_x_t, static_y_frame, out=static_dnn_input)
+            # Raw TensorRT engine call: outputs[0] is the velocity v,
+            # outputs[1:] are the next recurrent-state tensors, copied back
+            # into the fixed-address state buffers for the next frame.
             outputs = flow.engine(static_dnn_input, time_tensors[step_idx], *flow_states[step_idx])
             for state_buffer, next_state in zip(flow_states[step_idx], outputs[1:]):
                 state_buffer.copy_(next_state)
@@ -297,6 +325,8 @@ def run_streaming_audio_pipeline_with_tensorrt_cuda_graph(
     total_times: list[float] = []
 
     with torch.inference_mode():
+        # Warmup outside capture, then record — same discipline as the
+        # PyTorch graph pipeline above (see comments there).
         static_y_frame.normal_()
         static_noise_frame.normal_()
         for _ in range(3):
@@ -414,7 +444,13 @@ def run_streaming_se_audio_pipeline_with_cuda_graph_model(
     model_memory_format: str = "contiguous",
     return_audio: bool = False,
 ) -> dict:
-    """Run SE audio pipeline while replaying predictor+flow through CUDA Graph."""
+    """SE audio pipeline with predictor+flow captured as one CUDA Graph.
+
+    Same capture/check/replay structure as
+    run_streaming_audio_pipeline_with_cuda_graph_model, with the SE
+    differences: complex conditioning, an extra predictor DNN inside the
+    graph, x_0 = e + sigma_e*noise, and 6-channel flow input (x_t, e, y).
+    """
     assert device.type == "cuda", "CUDA Graph requires a CUDA device."
     assert audio.ndim == 2 and audio.shape[0] == 1, "Expected mono audio shaped [1, T]."
     assert steps > 0
@@ -486,6 +522,8 @@ def run_streaming_se_audio_pipeline_with_cuda_graph_model(
     total_times: list[float] = []
 
     with torch.inference_mode():
+        # Warmup -> capture -> replay-vs-eager check -> state reset, exactly
+        # as in the STFTPR graph pipeline above (see comments there).
         static_y_frame.normal_()
         static_noise_frame.normal_()
         for _ in range(3):

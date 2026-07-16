@@ -14,7 +14,11 @@ def _torch():
 
 
 def select_torch_device(name: str | None = "auto") -> "torch.device":
-    """Resolve a CLI device name to the best available torch device."""
+    """Resolve a CLI device name to the best available torch device.
+
+    "auto" prefers MPS over CUDA (a machine with MPS is a Mac without CUDA,
+    so the order only matters for exotic setups), then falls back to CPU.
+    """
     torch = _torch()
     if name is None or name.lower() == "auto":
         if torch.backends.mps.is_available():
@@ -26,7 +30,13 @@ def select_torch_device(name: str | None = "auto") -> "torch.device":
 
 
 def sync_device(device: "torch.device") -> None:
-    """Synchronize accelerator work around wall-clock timing."""
+    """Block until all queued accelerator work has finished.
+
+    GPU/MPS ops are asynchronous: a PyTorch call returns before the kernel
+    finishes. Any wall-clock measurement must be bracketed by this barrier
+    (before starting the timer and before stopping it) or it times the queue
+    submission, not the compute. No-op on CPU.
+    """
     torch = _torch()
     if device.type == "cuda":
         torch.cuda.synchronize()

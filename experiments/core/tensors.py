@@ -35,7 +35,12 @@ def torch_model_memory_format(memory_format: str):
 
 
 def apply_model_memory_format(module: Any, memory_format: str):
-    """Apply a 4D convolution-friendly memory format to module parameters."""
+    """Apply a 4D convolution-friendly memory format to module parameters.
+
+    channels_last stores conv weights as NHWC, which lets cuDNN/oneDNN pick
+    faster kernels; inputs must be converted too (format_model_tensor) or
+    every forward pays a layout round-trip.
+    """
     normalized = normalize_model_memory_format(memory_format)
     if normalized == "channels_last":
         return module.to(memory_format=torch_model_memory_format(normalized))
@@ -75,6 +80,11 @@ def pack_ri_channels(
     The full model receives complex tensors concatenated as [X, E, Y] and then
     internally converts them to [X.real, E.real, Y.real, X.imag, E.imag, Y.imag].
     DNN-only benchmarks must use the same channel layout.
+
+    n frames of [B, 2, F, T] -> one [B, 2n, F, T]: channels [0..n) are the
+    reals, channels [n..2n) the imags. With ``out=`` the packing is written
+    into a preallocated buffer (stable address for CUDA Graph capture and no
+    per-frame allocation) instead of building a new tensor.
     """
     if not frames:
         raise ValueError("At least one frame is required.")
@@ -83,6 +93,7 @@ def pack_ri_channels(
             raise ValueError("Expected every frame to have shape [B, 2, F, T].")
 
     if out is None:
+        # All reals first, then all imags — NOT interleaved per frame.
         packed = _torch().cat(
             [*(frame[:, 0:1] for frame in frames), *(frame[:, 1:2] for frame in frames)],
             dim=1,
@@ -93,6 +104,6 @@ def pack_ri_channels(
     if out.shape[1] != 2 * n:
         raise ValueError(f"Output buffer has {out.shape[1]} channels, expected {2 * n}.")
     for idx, frame in enumerate(frames):
-        out[:, idx : idx + 1].copy_(frame[:, 0:1])
-        out[:, n + idx : n + idx + 1].copy_(frame[:, 1:2])
+        out[:, idx : idx + 1].copy_(frame[:, 0:1])  # real of frame idx
+        out[:, n + idx : n + idx + 1].copy_(frame[:, 1:2])  # imag of frame idx
     return out

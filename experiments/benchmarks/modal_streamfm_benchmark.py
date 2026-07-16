@@ -72,6 +72,8 @@ image = (
     .add_local_dir(str(LOCAL_ROOT / "sgmse"), remote_path=f"{REMOTE_ROOT}/sgmse", ignore=["**/__pycache__/**", "**/*.pyc"])
 )
 
+# Only the small DNN-only exports are baked into the image; full training
+# checkpoints come from the shared cache volume instead (see _remote_paths).
 for checkpoint_name in (
     "streamfm_stftpr_dnn_only.pt",
     "streamfm_bwe_dnn_only.pt",
@@ -105,6 +107,8 @@ app = modal.App("streamfm-benchmark", image=image)
 DEFAULT_INPUT_AUDIO = "inputs/test_clips/audio_43m28_10s.wav"
 
 
+# The helpers below mirror their twins in streamfm_benchmark.py; `modal run`
+# executes this file as the entrypoint, so it keeps its own copies.
 def _safe_name(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value).strip("_") or "unknown"
 
@@ -248,6 +252,8 @@ def _remote_paths():
     return make_benchmark_paths(
         repo_root=REMOTE_ROOT,
         config_dir=f"{REMOTE_ROOT}/config",
+        # Search order: volume first (large full checkpoints uploaded once),
+        # then the image-baked DNN-only exports.
         checkpoint_roots=(
             f"{VOLUME_ROOT}/checkpoints",
             f"{REMOTE_ROOT}/checkpoints",
@@ -336,6 +342,9 @@ def _run_modal_benchmark(
     return results
 
 
+# One Modal function per hardware tier: the GPU type must be fixed in the
+# decorator at definition time, so the tiers cannot share a single function.
+# MODAL_FUNCTIONS below maps the hardware name back to the right one.
 @app.function(timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
 def benchmark_cpu(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, tensorrt_cuda_graph: bool = False, float32_matmul_precision: str = "high"):
     """Run the selected benchmark on Modal CPU."""
@@ -532,7 +541,11 @@ def _run_modal_benchmark_batch(
     input_audio_bytes: bytes,
     input_audio_name: str,
 ) -> list[dict]:
-    """Run multiple benchmark trials inside one warm Modal container."""
+    """Run multiple benchmark trials inside one warm Modal container.
+
+    Batching amortizes container boot and compiler warmup across the sweep,
+    and keeps every trial on the exact same physical machine.
+    """
     outputs: list[dict] = []
     total = len(trials)
     for trial_index, trial in enumerate(trials):
@@ -709,6 +722,8 @@ def main(
         input_audio_bytes=input_audio_bytes,
         input_audio_name=input_audio_name,
         profile=profile,
+        # No remote profile path: the summary comes back inside the result row
+        # and is written to a LOCAL file below.
         profile_file="",
         checkpoint_name=ckpt,
         ptq_int8=ptq_int8,

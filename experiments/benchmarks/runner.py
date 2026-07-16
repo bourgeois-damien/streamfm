@@ -88,7 +88,12 @@ def _apply_ptq_int8_if_requested(
 
 
 def _streaming_config_from_model_cfg(cfg):
-    """Create a synthetic streaming STFT config matching a Stream.FM model config."""
+    """Build the streaming STFT config from the model's Hydra config.
+
+    Reading n_fft/hop/alpha/beta from the checkpoint's own config keeps the
+    benchmark front-end identical to the features the model was trained on
+    (lyra uses a different hop, hence a different frame budget).
+    """
     from experiments.streaming.pipeline import StreamingSTFTConfig
 
     feature_cfg = cfg.model.feature_extractor
@@ -105,6 +110,8 @@ def _streaming_config_from_model_cfg(cfg):
 
 
 def _frame_budget_ms_from_config(config) -> float:
+    # Real-time budget per frame: the time one hop of audio lasts
+    # (256/16000 = 16 ms). budget_ratio_mean = mean_ms / this; < 1 = real-time.
     return 1000.0 * float(config.hop_length) / float(config.sample_rate)
 
 
@@ -150,7 +157,13 @@ def _benchmark_flow_task(
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
 ) -> tuple[list[dict], float, float]:
-    """Load and benchmark a flow-only task."""
+    """Load and benchmark a flow-only task (stftpr/bwe/derev/lyra).
+
+    Returns (result rows, load_s, benchmark_s) — model loading is timed
+    separately so it never pollutes the per-frame numbers.
+    """
+    # 1) Load the backbone, then stack the requested transformations:
+    # PTQ INT8 (CPU) -> memory format -> TensorRT adapter (CUDA).
     load_started_at = time.perf_counter()
     model, cfg = load_flow_model(device, model_dtype, paths, task=task, checkpoint_name=checkpoint_name or None)
     model, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
@@ -188,6 +201,11 @@ def _benchmark_flow_task(
     load_s = time.perf_counter() - load_started_at
     bench_started_at = time.perf_counter()
 
+    # 2) Dispatch to the matching timing loop:
+    #    model            -> random frames, eager/compiled (or TensorRT+graph)
+    #    graph_model      -> random frames, CUDA Graph replay
+    #    audio            -> real STFT pipeline over real/synthetic audio
+    #    audio_graph_model-> same pipeline with the solver as one CUDA Graph
     if use_tensorrt and tensorrt_cuda_graph and internal_pipeline == "model":
         from experiments.benchmarks.tensorrt.streaming import (
             benchmark_tensorrt_flow_steps_cuda_graph,
@@ -319,6 +337,8 @@ def _benchmark_flow_task(
     else:
         raise ValueError("Unsupported flow-task pipeline.")
 
+    # 3) Stamp TensorRT/PTQ metadata onto every row so a result line is
+    # self-describing in the history file.
     for row in results:
         row["task"] = task
         if trt_validation is not None:
@@ -361,7 +381,7 @@ def _benchmark_se_predictor_task(
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
 ) -> tuple[list[dict], float, float]:
-    """Load and benchmark the SE predictor-only task."""
+    """Load the SE predictor and time it alone: one DNN call per frame, no flow."""
     load_started_at = time.perf_counter()
     predictor, _ = load_se_predictor(device, dtype=model_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
     predictor, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
@@ -426,7 +446,7 @@ def _benchmark_se_flow_task(
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
 ) -> tuple[list[dict], float, float]:
-    """Load and benchmark the SE flow-only task."""
+    """Load the SE flow backbone and time the Euler solver without the predictor."""
     load_started_at = time.perf_counter()
     flow, flow_cfg = load_se_flow(device, dtype=model_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
     flow, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
@@ -438,6 +458,8 @@ def _benchmark_se_flow_task(
         model_dtype=model_dtype,
     )
     flow = apply_model_memory_format(flow, model_memory_format)
+    # Noise scale for x_0 = e + sigma_e * noise, read from the checkpoint's
+    # own config so the benchmark input distribution matches training.
     sigma_e = float(flow_cfg.model.sigma_e)
     load_s = time.perf_counter() - load_started_at
     bench_started_at = time.perf_counter()
@@ -497,9 +519,11 @@ def _benchmark_se_full_task(
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
 ) -> tuple[list[dict], float, float]:
-    """Load and benchmark the full SE task."""
+    """Load and benchmark the full SE chain: predictor + flow, 1 + steps DNN calls per frame."""
     load_started_at = time.perf_counter()
     se_model = load_se_full(device, dtype=model_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
+    # PTQ must cover both DNNs: quantizing only one would leave an
+    # int8/fp32 boundary in the middle of the per-frame chain.
     se_model["predictor"], _ptq_meta_pred, model_dtype = _apply_ptq_int8_if_requested(
         se_model["predictor"],
         ptq_int8=ptq_int8,
@@ -656,7 +680,11 @@ def run_internal_benchmark(
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
 ) -> tuple[list[dict], float, float]:
-    """Dispatch a benchmark run for an already-normalized task/pipeline."""
+    """Dispatch a benchmark run by task family: flow backbones vs the three SE variants.
+
+    Expects the already-normalized names from normalize_cli_options; returns
+    (result rows, load_s, benchmark_s) from the selected _benchmark_*_task.
+    """
     model_dtype = parse_model_dtype(model_dtype_name)
     steps_list = parse_steps(steps)
 
@@ -773,9 +801,17 @@ def run_benchmark(
     ptq_calib_steps: int = 32,
     tensorrt_cuda_graph: bool = False,
 ) -> list[dict]:
-    """Run one benchmark using the common local/Modal benchmark implementation."""
+    """Run one benchmark end to end; the single entry point shared by local CLI and Modal.
+
+    Validates option combinations, prepares the process (cwd, matmul
+    precision, CPU threads), runs the timing loops (optionally under the
+    PyTorch profiler) and returns the result rows with run metadata stamped
+    on. Printing/JSON output happens here; persistence is the caller's job.
+    """
     import torch
 
+    # 1) Resolve "auto" values and reject invalid execution/device/dtype
+    # combinations before any expensive model loading.
     requested_execution = execution.lower().replace("-", "_")
     execution = resolve_execution(execution, device)
     model_memory_format = normalize_model_memory_format(model_memory_format)
@@ -793,6 +829,9 @@ def run_benchmark(
     if tensorrt_cuda_graph and execution not in {"tensorrt", "tensorrt_int8"}:
         raise ValueError("--tensorrt-cuda-graph requires --execution tensorrt.")
 
+    # 2) Process-level setup. chdir to the repo root because checkpoint/config
+    # loading uses relative paths; matmul precision trades fp32 accuracy for
+    # TF32 speed on CUDA.
     started_at = time.perf_counter()
     os.chdir(paths.repo_root)
     torch.set_float32_matmul_precision(float32_matmul_precision)
@@ -822,7 +861,9 @@ def run_benchmark(
         raise ValueError("--save-audio requires --pipeline audio.")
     if input_audio_path and resolved["internal_pipeline"] not in {"audio", "audio_graph_model"}:
         raise ValueError("--input-audio requires --pipeline audio.")
-    
+
+    # Closure so the exact same call can run bare or wrapped in the profiler
+    # below without duplicating this argument list.
     def _benchmark_call() -> tuple[list[dict], float, float]:
         return run_internal_benchmark(
             internal_task=resolved["internal_task"],
@@ -850,6 +891,10 @@ def run_benchmark(
             ptq_calib_steps=ptq_calib_steps,
         )
 
+    # 3) Run the timing loops, optionally under the PyTorch profiler. The
+    # profiler wraps the WHOLE benchmark (model load + warmup + timed loop),
+    # so its op table is for spotting hot operators, not per-frame numbers;
+    # instrumentation overhead also inflates the ms stats of a profiled run.
     profiler_output = ""
     profile_target = profile_all or profile
     if profile_target:
@@ -862,6 +907,9 @@ def run_benchmark(
             profile_memory=False,
         ) as profiler:
             results, load_s, benchmark_s = _benchmark_call()
+        # key_averages() aggregates by op type across the whole run; sorting by
+        # self CPU time surfaces launch/dispatch overhead, which dominates for
+        # a model this small.
         profiler_output = profiler.key_averages().table(sort_by="self_cpu_time_total", row_limit=20)
         print("\nPyTorch profiler summary:")
         print(profiler_output)
@@ -873,10 +921,13 @@ def run_benchmark(
         with open(profile_file, "w", encoding="utf-8") as f:
             f.write(profiler_output or "")
     if device.type == "cuda":
-        torch.cuda.synchronize()
+        torch.cuda.synchronize()  # flush queued GPU work so total_s covers real compute
     total_s = time.perf_counter() - started_at
     hardware_name = device_label(device)
 
+    # 4) Stamp run-level metadata onto every row: requested vs resolved
+    # options, environment versions and wall-clock phases, so a history line
+    # can be interpreted long after the run without the CLI invocation.
     for row in results:
         row["backend"] = backend
         row["hardware"] = hardware

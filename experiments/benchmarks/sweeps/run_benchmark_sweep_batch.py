@@ -39,6 +39,7 @@ GPU_WORKERS_CONFIRM_THRESHOLD = 4
 
 
 def _resolve_input_audio_path(input_audio: str, *, pipeline: str) -> str:
+    """Twin of run_benchmark_sweep._resolve_input_audio_path (see there)."""
     if pipeline.lower().replace("-", "_") != "audio":
         return ""
     requested = input_audio.strip()
@@ -101,7 +102,11 @@ def _prepare_modal_trials(
     *,
     input_audio_path: str,
 ) -> list[dict[str, Any]]:
-    """Resolve per-trial iteration counts before sending them to Modal."""
+    """Resolve per-trial iteration counts before sending them to Modal.
+
+    The -1/duration modes need the local clip's duration; the remote container
+    cannot probe the file before receiving it, so send resolved counts.
+    """
     prepared: list[dict[str, Any]] = []
     for trial in trials:
         trial_copy = dict(trial)
@@ -144,6 +149,8 @@ def run_modal_benchmark_batch(
         if len(shards) == 1:
             return batch_fn.remote(shards[0], input_audio_bytes, input_audio_name)
 
+        # Spawn all shards first so the containers run concurrently; .get()
+        # below just collects them in order.
         handles = [
             batch_fn.spawn(shard, input_audio_bytes, input_audio_name)
             for shard in shards
@@ -230,6 +237,8 @@ def log_batch_trials_to_wandb(
             "project": project,
             "job_type": "benchmark-sweep-batch",
             "config": command,
+            # One process creates many runs back to back; reinit allows the
+            # next wandb.init after the previous run finishes.
             "reinit": True,
         }
         if entity:
@@ -275,6 +284,7 @@ def run_sweep_batch(
     assume_yes: bool = False,
 ) -> tuple[int, int]:
     """Expand a sweep YAML grid, run it locally or on Modal, and log to W&B."""
+    # 1) Expand the grid and validate the backend.
     trials = load_sweep_trials(sweep_yaml)
     if not trials:
         raise ValueError("Sweep YAML produced zero trials after exclusions.")
@@ -294,6 +304,8 @@ def run_sweep_batch(
         pipeline=pipeline,
     )
 
+    # 2) Group trials by hardware tier: each Modal batch function is bound to
+    # one GPU type, so a mixed sweep runs one batch per tier.
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for trial in trials:
         if backend == "modal":
@@ -304,6 +316,7 @@ def run_sweep_batch(
         trial["backend"] = backend
         grouped[hardware].append(trial)
 
+    # 3) Dry run: print the shard plan without launching any compute.
     total_trials = len(trials)
     if dry_run:
         if backend == "local":
@@ -326,6 +339,7 @@ def run_sweep_batch(
             )
         return len(grouped), total_trials
 
+    # 4) Many parallel GPU containers cost real money — ask first.
     if backend == "modal" and needs_gpu_workers_confirmation(grouped.keys(), worker_count) and not assume_yes:
         if not confirm_gpu_workers(
             hardware_names=list(grouped.keys()),
@@ -338,6 +352,8 @@ def run_sweep_batch(
     if backend == "local" and worker_count > 1:
         print("Note: --workers is ignored for backend=local (runs sequentially on this machine).", flush=True)
 
+    # 5) Run each hardware group, then create the W&B runs from the local
+    # side once the results are back.
     logged_runs = 0
     for hardware, hardware_trials in grouped.items():
         if backend == "local":

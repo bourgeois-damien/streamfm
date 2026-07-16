@@ -27,14 +27,23 @@ def benchmark_flow_steps(
     freq_bins: int = 256,
     frame_budget_ms: float = 16.0,
 ) -> list[dict]:
-    """Benchmark only a streaming flow model loop on random frames."""
+    """Time the pure DNN cost per frame: `steps` flow passes on a random frame.
+
+    No STFT, no real audio — this is the model_only pipeline. Returns one
+    result dict per entry in steps_list, each with latency percentiles and
+    budget_ratio_mean (mean_ms / frame_budget_ms; < 1 means real-time).
+    """
     import torch
 
     flow = model.eval()
     results = []
 
     for steps in steps_list:
+        # Random conditioning frame [1, 2, F, T=1]; content is irrelevant for
+        # timing, only shape/dtype/layout matter.
         y_frame = format_model_tensor(torch.randn(1, 2, freq_bins, 1, device=device, dtype=dtype), model_memory_format)
+        # One recurrent state per solver step: each step is its own causal
+        # pass over the frame sequence. Flow times t_k = k/steps built once.
         flow_states = [flow.init_state() for _ in range(steps)]
         t_tensors = [torch.full((1,), step_idx / max(steps, 1), device=device, dtype=dtype) for step_idx in range(steps)]
         dnn_input = empty_model_tensor((1, 4, freq_bins, 1), device=device, dtype=dtype, memory_format=model_memory_format)
@@ -43,13 +52,19 @@ def benchmark_flow_steps(
 
         with torch.inference_mode():
             for frame_idx in range(warmup + iterations):
+                # sync before AND after the timed region: GPU calls are
+                # async, without the barriers we'd time queue submission.
                 sync_device(device)
                 start = time.perf_counter()
 
+                # Euler solver: x_{k+1} = x_k + v(x_k, y, t_k)/steps. Two
+                # equivalent paths — in-place updates on preallocated buffers
+                # (no per-frame allocation) vs fresh tensors each step — to
+                # measure whether allocator traffic matters on this device.
                 if preallocate_model_buffers:
                     x_t_buffer.copy_(y_frame)
                     for step_idx in range(steps):
-                        pack_ri_channels(x_t_buffer, y_frame, out=dnn_input)
+                        pack_ri_channels(x_t_buffer, y_frame, out=dnn_input)  # [1, 4, F, 1] = (x_t, y)
                         v, flow_states[step_idx] = forward_step(
                             flow,
                             dnn_input,
@@ -73,6 +88,8 @@ def benchmark_flow_steps(
                         x_t = x_t + v / steps
 
                 sync_device(device)
+                # Warmup frames run the same code but are discarded (lazy
+                # init, cache warming, torch.compile happen there).
                 if frame_idx >= warmup:
                     times_ms.append((time.perf_counter() - start) * 1000.0)
 
@@ -106,7 +123,11 @@ def benchmark_se_predictor(
     dtype,
     model_memory_format: str = "contiguous",
 ) -> list[dict]:
-    """Benchmark only the SE initial predictor DNN on random streaming frames."""
+    """Time only the SE initial predictor: one DNN call per frame, no flow.
+
+    Same timing discipline as benchmark_flow_steps (sync/time/sync, warmup
+    discarded). Frames are pre-generated so indexing, not RNG, is timed.
+    """
     import torch
 
     predictor = predictor.eval()
@@ -162,7 +183,12 @@ def benchmark_se_flow(
     preallocate_model_buffers: bool = False,
     model_memory_format: str = "contiguous",
 ) -> list[dict]:
-    """Benchmark only the SE generative flow DNN loop on random E/Y frames."""
+    """Time only the SE flow solver, feeding it random predictor outputs.
+
+    The predictor is skipped: e/y frames are random. x_0 = e + sigma_e*noise
+    is built OUTSIDE the timed region (only the `steps` DNN calls and Euler
+    updates are measured). Flow input packs (x_t, e, y) into 6 channels.
+    """
     import torch
 
     flow = flow.eval()
@@ -256,7 +282,11 @@ def benchmark_se_full(
     preallocate_model_buffers: bool = False,
     model_memory_format: str = "contiguous",
 ) -> list[dict]:
-    """Benchmark the SE initial predictor followed by the SE flow solver."""
+    """Time the full SE frame: predictor + `steps` flow passes (1 + steps DNN calls).
+
+    Unlike benchmark_se_flow, the timed region starts at the predictor, so
+    x_0 construction is included — this is the realistic per-frame cost.
+    """
     import torch
 
     predictor = predictor.eval()

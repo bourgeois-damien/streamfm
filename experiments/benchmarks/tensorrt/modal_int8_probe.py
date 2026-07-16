@@ -76,6 +76,11 @@ app = modal.App("streamfm-tensorrt-int8-probe", image=image)
 
 
 def _measure_ms(fn, *, warmup: int, iterations: int) -> dict[str, float]:
+    """Time fn with one CUDA event pair per call; returns mean/p50/p90/p99 in ms.
+
+    end.synchronize() inside the loop makes each sample individually valid
+    (no overlap between consecutive calls).
+    """
     import torch
 
     with torch.inference_mode():
@@ -262,6 +267,8 @@ def probe(
     paths = make_benchmark_paths(Path(REMOTE_ROOT))
     model_fp32, _cfg = load_flow_model(device, torch.float32, paths, task="stftpr")
     model_fp32 = model_fp32.eval().to(memory_format=torch_memory_format)
+    # [B, 4, F, T=8]: (x_t, y) real/imag pairs over an 8-frame offline window
+    # (fixed_window mode only; streaming mode builds its own T=1 input below).
     x_fp32 = torch.randn(1, 4, 256, 8, device=device, dtype=torch.float32).contiguous(
         memory_format=torch_memory_format
     )
@@ -345,6 +352,8 @@ def probe(
     if mode != "fixed_window":
         raise ValueError("mode must be 'fixed_window' or 'streaming_fp16'.")
 
+    # fixed_window mode: compile the same 8-frame forward at fp32/fp16/int8
+    # and compare every engine against the eager fp32 reference (diff_stats).
     eager_fp32_out = model_fp32(x_fp32, time_cond=time_cond_fp32)
     trt_fp32_engine = torch_tensorrt.compile(
         model_fp32,

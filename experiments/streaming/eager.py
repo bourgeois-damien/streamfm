@@ -42,31 +42,48 @@ def run_streaming_audio_pipeline(
     model_memory_format: str = "contiguous",
     return_audio: bool = False,
 ) -> dict:
-    """Run an eager simulated streaming STFT -> model -> ISTFT pipeline."""
+    """Simulate streaming STFTPR over real audio: STFT -> flow solver -> ISTFT per frame.
+
+    Times each stage separately (stft/model/istft plus total) and returns one
+    summary dict with prefixed metrics; with ``return_audio`` the enhanced
+    waveform (CPU tensor) is included so quality can be checked, not just speed.
+    """
     assert audio.ndim == 2 and audio.shape[0] == 1, "Expected mono audio shaped [1, T]."
     assert steps > 0
 
+    # 1) Deterministic setup: fixed seed so noise (and thus output audio) is
+    # reproducible across runs and executions.
     torch.manual_seed(seed)
     flow = flow.eval()
     audio = audio.to(device)
     window = sqrt_hann_window(config, device)
     norm = compression_norm(config)
 
+    # 2) Pad the audio to exactly (warmup + iterations) hops.
     total_frames = warmup + iterations
     required_samples = total_frames * config.hop_length
     if audio.shape[-1] < required_samples:
         audio = torch.nn.functional.pad(audio, (0, required_samples - audio.shape[-1]))
 
+    # 3) Streaming buffers. input_buffer [1, n_fft] is the sliding analysis
+    # window; output/denom accumulate the overlap-add reconstruction and the
+    # summed squared synthesis windows used to normalize it at the end.
     input_buffer = torch.zeros(1, config.n_fft, device=device)
     output = torch.zeros(1, required_samples + config.n_fft, device=device)
     denom = torch.zeros_like(output)
+    # One recurrent state per solver step: each step k is its own causal pass
+    # over the frame sequence, so its state must persist across frames.
     flow_states = [flow.init_state() for _ in range(steps)]
     freq_bins = frequency_bins(config)
+    # Noise pre-generated for all frames [total, 1, 2, F, 1] so RNG cost never
+    # lands inside the timed region.
     noise_frames = torch.randn(total_frames, 1, 2, freq_bins, 1, device=device, dtype=model_dtype)
+    # Flow times t_k = k/steps, constant across frames -> build once.
     t_tensors = [
         torch.full((1,), step_idx / max(steps, 1), device=device, dtype=model_dtype)
         for step_idx in range(steps)
     ]
+    # Reused DNN input [1, 4, F, 1] = pack(x_t, y) and solver state x_t [1, 2, F, 1].
     dnn_input = empty_model_tensor((1, 4, freq_bins, 1), device=device, dtype=model_dtype, memory_format=model_memory_format)
     x_t_buffer = empty_model_tensor((1, 2, freq_bins, 1), device=device, dtype=model_dtype, memory_format=model_memory_format)
 
@@ -77,13 +94,19 @@ def run_streaming_audio_pipeline(
 
     with torch.inference_mode():
         for frame_idx in range(total_frames):
+            # 4a) Slide the analysis window by one hop of fresh samples.
             chunk_start = frame_idx * config.hop_length
             chunk = audio[:, chunk_start:chunk_start + config.hop_length]
             input_buffer = torch.cat([input_buffer[:, config.hop_length:], chunk], dim=-1)
 
+            # Each stage is bracketed by sync_device so the per-stage times
+            # measure finished GPU work, not async queue submission.
             sync_device(device)
             total_start = time.perf_counter()
 
+            # 4b) STFT + compression. Phase retrieval: the model is
+            # conditioned on the magnitude ONLY (abs) and must reconstruct
+            # the phase itself.
             stft_start = time.perf_counter()
             spectrum = torch.fft.rfft(input_buffer * window, n=config.n_fft, norm=norm)
             if config.cut_highest_freqs:
@@ -94,6 +117,8 @@ def run_streaming_audio_pipeline(
             sync_device(device)
             stft_ms = (time.perf_counter() - stft_start) * 1000.0
 
+            # 4c) Euler flow solver: x_0 ~ y + sigma_y*noise, then
+            # x_{k+1} = x_k + v(x_k, y, t_k)/steps for k = 0..steps-1.
             model_start = time.perf_counter()
             y_frame_model = format_model_tensor(y_frame.to(model_dtype), model_memory_format)
             if preallocate_model_buffers:
@@ -127,6 +152,7 @@ def run_streaming_audio_pipeline(
             sync_device(device)
             model_ms = (time.perf_counter() - model_start) * 1000.0
 
+            # 4d) ISTFT + overlap-add of this frame's n_fft samples.
             istft_start = time.perf_counter()
             x_complex = ri_frame_to_complex(model_output.float())
             x_complex = decompress_complex(x_complex, config)
@@ -138,6 +164,8 @@ def run_streaming_audio_pipeline(
             sync_device(device)
             istft_ms = (time.perf_counter() - istft_start) * 1000.0
 
+            # Warmup frames run the exact same code but are not recorded
+            # (first frames pay lazy init, cache misses, compilation).
             total_ms = (time.perf_counter() - total_start) * 1000.0
             if frame_idx >= warmup:
                 stft_times.append(stft_ms)
@@ -145,6 +173,8 @@ def run_streaming_audio_pipeline(
                 istft_times.append(istft_ms)
                 total_times.append(total_ms)
 
+    # 5) Overlap-add normalization: divide by the accumulated squared window
+    # so overlapping frames sum to unity gain (clamp avoids 0/0 at the edges).
     output = output[:, :required_samples]
     denom = denom[:, :required_samples].clamp_min(1e-8)
     output = output / denom
@@ -188,7 +218,14 @@ def run_streaming_se_audio_pipeline(
     model_memory_format: str = "contiguous",
     return_audio: bool = False,
 ) -> dict:
-    """Run simulated streaming SE: STFT -> predictor -> flow -> ISTFT."""
+    """Simulate streaming SE over real audio: STFT -> predictor -> flow -> ISTFT per frame.
+
+    Same structure and timing discipline as run_streaming_audio_pipeline; the
+    SE differences are: conditioning keeps the full complex spectrum (phase
+    included), an initial predictor DNN estimates e from y each frame, the
+    solver starts at x_0 = e + sigma_e*noise, and the flow input packs three
+    frames (x_t, e, y) into 6 channels instead of two into 4.
+    """
     assert audio.ndim == 2 and audio.shape[0] == 1, "Expected mono audio shaped [1, T]."
     assert steps > 0
 
@@ -236,11 +273,15 @@ def run_streaming_se_audio_pipeline(
             spectrum = torch.fft.rfft(input_buffer * window, n=config.n_fft, norm=norm)
             if config.cut_highest_freqs:
                 spectrum = spectrum[:, :-config.cut_highest_freqs]
+            # Unlike STFTPR, SE keeps the complex spectrum: phase is available,
+            # the task is denoising, not phase retrieval.
             y_complex = compress_complex(spectrum, config)
             y_frame = complex_to_ri_frame(y_complex)
             sync_device(device)
             stft_ms = (time.perf_counter() - stft_start) * 1000.0
 
+            # Predictor gives the initial estimate e from noisy y, then the
+            # flow refines from x_0 = e + sigma_e*noise.
             model_start = time.perf_counter()
             y_frame_model = format_model_tensor(y_frame.to(model_dtype), model_memory_format)
             e_frame, predictor_state = forward_step(

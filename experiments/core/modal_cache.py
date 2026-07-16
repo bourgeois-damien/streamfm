@@ -18,7 +18,12 @@ def _safe_cache_label(label: str) -> str:
 
 
 def configure_shared_modal_cache(*, volume_root: str, hardware: str) -> dict[str, str]:
-    """Share content-addressed compiler caches between experiment combinations."""
+    """Point torch/inductor/triton caches at the persistent Modal volume.
+
+    Caches are namespaced per GPU type because compiled kernels are
+    architecture-specific — an L4 artifact is useless (or harmful) on an
+    A100. Must run before the first torch.compile call to have any effect.
+    """
     hardware_label = _safe_cache_label(hardware.upper())
     shared_root = f"{volume_root}/cache/shared/{CACHE_LAYOUT_VERSION}"
     cache_root = f"{shared_root}/{hardware_label}"

@@ -17,7 +17,13 @@ def normalize_cli_options(
     pipeline: str,
     execution: str,
 ) -> dict:
-    """Map explicit CLI options to internal benchmark names."""
+    """Map explicit CLI options to internal benchmark names.
+
+    Rejects invalid combinations early (before any model load) and returns the
+    dict the runner dispatches on: ``internal_task`` picks the benchmark
+    family, ``internal_pipeline`` picks model-only vs audio and eager vs
+    CUDA-Graph variants.
+    """
     requested_task = task.lower().replace("-", "_")
     requested_part = part.lower().replace("-", "_")
     requested_pipeline = pipeline.lower().replace("-", "_")
@@ -33,6 +39,8 @@ def normalize_cli_options(
     if requested_execution not in {"eager", "compiled", "cuda_graph", "tensorrt", "tensorrt_int8"}:
         raise ValueError("Unsupported execution. Use eager, compiled, cuda_graph, tensorrt, or tensorrt_int8.")
 
+    # Flow-only tasks (stftpr/bwe/...) have a single DNN, so part=model and
+    # part=flow are the same thing; only SE splits into predictor + flow.
     if requested_task in FLOW_TASKS:
         if requested_part == "predictor":
             raise ValueError(f"{requested_task} has no predictor. Use '--part model' or '--part flow'.")

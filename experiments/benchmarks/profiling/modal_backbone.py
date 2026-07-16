@@ -15,6 +15,7 @@ if REMOTE_ROOT not in sys.path:
 
 
 def _find_repo_root() -> Path:
+    """Locate the repo root by its landmarks; runs locally before Modal builds the image."""
     current_file = Path(__file__).resolve()
     for candidate in (current_file.parent, *current_file.parents):
         if (candidate / "config").is_dir() and (candidate / "sgmse").is_dir():
@@ -43,6 +44,8 @@ image = (
     .add_local_dir(str(LOCAL_ROOT / "sgmse"), remote_path=f"{REMOTE_ROOT}/sgmse")
 )
 
+# Only the small DNN-only export is baked into the image; anything else must
+# come from the shared cache volume (see _remote_paths).
 for checkpoint_name in ("streamfm_stftpr_dnn_only.pt",):
     local_checkpoint = LOCAL_ROOT / "checkpoints" / checkpoint_name
     if local_checkpoint.exists():
@@ -57,6 +60,8 @@ app = modal.App("streamfm-backbone-profile", image=image)
 def _remote_paths():
     from experiments.core.paths import make_benchmark_paths
 
+    # Search order: volume first (full checkpoints uploaded once), then the
+    # image-baked DNN-only export.
     return make_benchmark_paths(
         repo_root=REMOTE_ROOT,
         config_dir=f"{REMOTE_ROOT}/config",

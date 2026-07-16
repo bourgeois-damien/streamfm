@@ -37,6 +37,8 @@ def make_benchmark_paths(
 def checkpoint_path(filename: str, paths: BenchmarkPaths) -> str:
     """Resolve a checkpoint by searching configured checkpoint roots."""
     requested = Path(filename).expanduser()
+    # An explicit path (absolute or containing a directory part) is taken
+    # as-is; only bare filenames are searched across the checkpoint roots.
     if requested.is_absolute() or requested.parent != Path("."):
         if requested.exists():
             return str(requested)

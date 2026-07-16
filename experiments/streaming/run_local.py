@@ -77,6 +77,8 @@ def main() -> None:
 
     device = select_device(args.device)
     model = load_stftpr_backbone(device)
+    # The model is trained on 16 kHz mono: keep the first channel and resample
+    # anything else before framing.
     wav, sr = torchaudio.load(args.input)
     if wav.shape[0] > 1:
         wav = wav[:1]

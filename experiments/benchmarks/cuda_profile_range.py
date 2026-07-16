@@ -13,6 +13,14 @@ import os
 
 
 class CudaProfileRange:
+    """Bracket the first N measured frames for external profilers; a no-op otherwise.
+
+    Two independent env-var switches: STREAMFM_CUDA_PROFILE_FRAMES opens a
+    cudaProfilerStart/Stop window (Nsight launched with --capture-range
+    cudaProfilerApi records only that window), and STREAMFM_TORCH_TRACE_PATH
+    + STREAMFM_TORCH_PROFILE_FRAMES export a Chrome trace of those frames.
+    """
+
     def __init__(self, torch, *, label: str):
         self.torch = torch
         self.label = label
@@ -27,6 +35,7 @@ class CudaProfileRange:
         self.torch_profiler_active = False
 
     def start(self) -> None:
+        """Arm the requested profilers just before the measured loop begins."""
         if self.active or self.stopped:
             return
         if self.torch_trace_path and self.torch_frame_limit > 0:
@@ -41,6 +50,8 @@ class CudaProfileRange:
             self.torch_profiler.start()
             self.torch_profiler_active = True
         if self.frame_limit > 0:
+            # Drain the queue first so leftover warmup kernels don't leak
+            # into the Nsight capture window.
             self.torch.cuda.synchronize()
             status = self.torch.cuda.cudart().cudaProfilerStart()
             if status != 0:
@@ -51,6 +62,7 @@ class CudaProfileRange:
 
     @contextmanager
     def frame(self, measured_index: int):
+        """Wrap one measured frame in an NVTX range so it is findable on the timeline."""
         active_limit = max(self.frame_limit, self.torch_frame_limit)
         profile_this_frame = self.active and measured_index < active_limit
         if profile_this_frame:
@@ -64,6 +76,11 @@ class CudaProfileRange:
                 self.torch.cuda.nvtx.range_pop()
 
     def finish_frame(self, measured_index: int) -> None:
+        """Advance the torch profiler and shut both profilers down once the frame limit is hit.
+
+        Synchronizes before stopping so trailing GPU work still lands inside
+        the capture window / trace.
+        """
         if self.torch_profiler_active:
             self.torch_profiler.step()
             if measured_index + 1 >= self.torch_frame_limit:
@@ -84,6 +101,7 @@ class CudaProfileRange:
         self.stopped = True
 
     def close(self) -> None:
+        """Safety net for early loop exits: stop whatever is still recording."""
         if not self.active:
             return
         self.torch.cuda.synchronize()

@@ -27,6 +27,7 @@ DEFAULT_INPUT_AUDIO = "inputs/test_clips/audio_43m28_10s.wav"
 
 
 def _safe_name(value: str) -> str:
+    """Sanitize a value for use inside an output filename."""
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value).strip("_") or "unknown"
 
 
@@ -72,10 +73,20 @@ def _save_audio_results(results: list[dict], args: argparse.Namespace, *, backen
 
 
 def _default_audio_hop_s(task: str) -> float:
+    """Frame hop in seconds, used to convert an audio duration into a frame count.
+
+    Lyra uses a 20 ms hop (320 samples at 16 kHz); every other task hops
+    16 ms (256 samples).
+    """
     return 0.020 if task.lower().replace("-", "_") == "lyra" else 0.016
 
 
 def _resolve_input_audio_path(args: argparse.Namespace) -> str:
+    """Resolve --input-audio to an absolute path, or "" to fall back to synthetic audio.
+
+    The default clip is best-effort: if it is missing the pipeline generates
+    audio instead. A path the user typed explicitly must exist.
+    """
     if args.pipeline.lower().replace("-", "_") != "audio":
         return ""
     requested = args.input_audio.strip()
@@ -125,6 +136,12 @@ def _input_audio_duration_s(input_audio_path: str) -> float:
 
 
 def _resolve_iterations(args: argparse.Namespace) -> int:
+    """Turn the three iteration modes into a concrete measured-frame count.
+
+    Modes: an explicit --iterations count; --audio-duration-s converted to
+    frames via the task hop; or --iterations -1 meaning "the whole input
+    file" (audio pipeline only, since only there do frames map to audio).
+    """
     if args.pipeline.lower().replace("-", "_") != "audio":
         if args.audio_duration_s > 0:
             raise ValueError("--audio-duration-s is only supported with --pipeline audio.")
@@ -134,6 +151,8 @@ def _resolve_iterations(args: argparse.Namespace) -> int:
     if args.audio_duration_s > 0:
         return max(1, math.ceil(args.audio_duration_s / _default_audio_hop_s(args.task)))
     if args.iterations == -1:
+        # Whole-file mode: warmup frames come out of the same file, so subtract
+        # them to keep measured frames within the audio that actually exists.
         duration_s = _input_audio_duration_s(args.input_audio_path) if args.input_audio_path else 10.0
         return max(1, math.ceil(duration_s / _default_audio_hop_s(args.task)) - max(args.warmup, 0))
     return args.iterations
@@ -332,7 +351,12 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
 
 
 def _run_modal(args: argparse.Namespace, hardware: str) -> None:
-    """Delegate Modal execution to the Modal wrapper."""
+    """Delegate Modal execution to the Modal wrapper.
+
+    Re-invokes ``modal run`` as a subprocess because the Modal CLI owns app
+    setup and remote deployment; options are forwarded only when they differ
+    from their defaults to keep the remote command line readable.
+    """
     modal_script = Path("experiments/benchmarks/modal_streamfm_benchmark.py")
     command = [
         sys.executable,

@@ -18,6 +18,8 @@ from experiments.core.history import history_file_lock, write_json_atomic
 DEFAULT_HISTORY_JSON = "outputs/streamfm_benchmark_history.json"
 DEFAULT_WANDB_PROJECT = "streamfm-benchmarks"
 DEFAULT_SWEEP_WANDB_PROJECT = "streamfm-benchmark-sweeps"
+# Columns kept in the compact *_summary.json — the fields worth eyeballing
+# when comparing runs; the full history keeps everything.
 HISTORY_SUMMARY_COLUMNS = (
     "run_started_at",
     "run_id",
@@ -61,6 +63,9 @@ HISTORY_SUMMARY_COLUMNS = (
     "total_s",
 )
 
+# W&B split: config = what identifies/configures the run (filterable),
+# metrics = numbers to plot, excluded = bulky or non-serializable payloads.
+# Numeric keys missing from both sets fall back to _looks_like_metric below.
 WANDB_CONFIG_KEYS = {
     "audio_sample_rate",
     "backend",
@@ -180,6 +185,7 @@ def _json_scalar(value: Any) -> Any:
 
 
 def _looks_like_metric(key: str, value: Any) -> bool:
+    """Heuristic for numeric keys not in WANDB_METRIC_KEYS: rely on the naming conventions (_ms/_s suffixes, ratio)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     return (
@@ -224,7 +230,12 @@ def build_benchmark_records(
     run_started_at: str,
     extra_tags: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
-    """Build row-oriented benchmark records for exports such as W&B."""
+    """Build row-oriented benchmark records for exports such as W&B.
+
+    Each result row is split into config/metrics/metadata using the explicit
+    key sets first, then the metric-name heuristic, with remaining scalars
+    kept as metadata so nothing quietly disappears.
+    """
     records: list[dict[str, Any]] = []
     for row_idx, row in enumerate(results):
         benchmark_row_id = f"{run_id}-{row_idx:03d}"
@@ -332,6 +343,8 @@ def _log_records_to_wandb(
     if not records:
         return
 
+    # One W&B run per result row (a benchmark can emit several rows, e.g. one
+    # per steps value); the shared group ties them back to the same launch.
     for record in records:
         init_kwargs = {
             "project": project,
@@ -416,6 +429,8 @@ def record_benchmark_results(
         for row in results
     ]
 
+    # Always append to the shared default history; --history-json adds a
+    # second copy (e.g. a per-sweep file) without replacing the shared one.
     history_paths = [Path(DEFAULT_HISTORY_JSON)]
     if history_json:
         extra_history_path = Path(history_json)
@@ -423,6 +438,8 @@ def record_benchmark_results(
             history_paths.append(extra_history_path)
     for history_path in history_paths:
         history_path.parent.mkdir(parents=True, exist_ok=True)
+        # The whole read-append-write cycle sits under the file lock so
+        # concurrent runs (sweep workers) cannot drop each other's rows.
         with history_file_lock(history_path):
             if history_path.exists():
                 all_history_rows = json.loads(history_path.read_text(encoding="utf-8"))
