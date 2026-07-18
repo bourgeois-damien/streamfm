@@ -39,7 +39,6 @@ experiments/
 │   ├── loading.py                # checkpoint/backbone loading
 │   ├── results.py                # history summaries + W&B logging
 │   ├── modal_streamfm_benchmark.py   # Modal remote entrypoints
-│   ├── upload_history_to_wandb.py    # backfill W&B from saved history
 │   ├── cuda_profile_range.py         # profiler range markers
 │   ├── profiling/                # backbone profiling (local + Modal + Nsight)
 │   ├── tensorrt/                 # TensorRT streaming + INT8 probe
@@ -51,13 +50,15 @@ experiments/
 │   ├── results.py                # history summaries + W&B logging
 │   ├── modal_streamfm_eval.py    # Modal remote entrypoints
 │   ├── modal_defaults.py         # default data paths on Modal
-│   ├── upload_eval_history_to_wandb.py
 │   ├── scoring/                  # metric scoring + subset convergence
 │   └── sweeps/                   # eval grid runner
 ├── inference/
 │   ├── local.py                  # minimal local inference entry point
 │   └── compress_modal.py         # checkpoint compression on Modal
 ├── datasets/                     # dataset provisioning/inspection on Modal
+├── tools/                        # one-shot maintenance scripts (run by hand)
+│   ├── upload_history_to_wandb.py       # backfill benchmark W&B from saved history
+│   └── upload_eval_history_to_wandb.py  # backfill eval W&B from saved history
 └── training/
     └── modal_train.py            # durable Modal training launcher
 ```
