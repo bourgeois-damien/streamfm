@@ -439,6 +439,10 @@ def capture_torch_trace(
     env["STREAMFM_TORCH_PROFILE_FRAMES"] = str(profile_frames)
     env["STREAMFM_TORCH_TRACE_PATH"] = str(trace_path)
     env["STREAMFM_TRT_REQUIRE_FULL_COMPILATION"] = "1" if require_full_compilation else "0"
+    if execution == "tensorrt":
+        env["STREAMFM_TRT_LAYER_INFO_PATH"] = str(output_dir / "tensorrt_engine_layers.json")
+        env["STREAMFM_TRT_LAYER_PROFILE_DIR"] = str(output_dir / "tensorrt_layer_profile")
+        env["STREAMFM_TRT_EXPORTED_OPS_PATH"] = str(output_dir / "tensorrt_exported_ops.json")
     target = _target_command(
         execution=execution,
         dtype=dtype,

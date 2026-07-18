@@ -8,8 +8,10 @@ version of every buffer on each frame.
 
 from __future__ import annotations
 
-import time
+import json
 import os
+from pathlib import Path
+import time
 from typing import Any
 
 
@@ -79,6 +81,50 @@ def _make_step_module(model, state_template):
             return (y, *_flatten_tensor_state(next_state))
 
     return Step().eval()
+
+
+def _export_value_summary(value: Any) -> Any:
+    """Turn FakeTensor metadata into compact JSON-safe shape/dtype summaries."""
+    if isinstance(value, (list, tuple)):
+        return [_export_value_summary(item) for item in value]
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        return {
+            "shape": [str(dimension) for dimension in shape],
+            "dtype": str(getattr(value, "dtype", "")),
+            "stride": [str(item) for item in value.stride()] if hasattr(value, "stride") else None,
+        }
+    return repr(value)
+
+
+def _dump_exported_ops_from_env(program) -> dict[str, Any]:
+    """Persist FX node names so TensorRT layer names map back to StreamFM source."""
+    output_path = os.environ.get("STREAMFM_TRT_EXPORTED_OPS_PATH", "")
+    if not output_path:
+        return {"exported_ops_available": False}
+
+    nodes = []
+    for node in program.graph_module.graph.nodes:
+        nodes.append(
+            {
+                "name": node.name,
+                "op": node.op,
+                "target": str(node.target),
+                "input_nodes": [input_node.name for input_node in node.all_input_nodes],
+                "output": _export_value_summary(node.meta.get("val")),
+                "nn_module_stack": repr(node.meta.get("nn_module_stack")),
+                "source_fn_stack": repr(node.meta.get("source_fn_stack")),
+                "stack_trace": node.meta.get("stack_trace", ""),
+            }
+        )
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"nodes": nodes}, indent=2), encoding="utf-8")
+    return {
+        "exported_ops_available": True,
+        "exported_ops_count": len(nodes),
+        "exported_ops_path": str(path),
+    }
 
 
 def _preserve_modelopt_amax_buffers_for_export() -> None:
@@ -222,6 +268,7 @@ class TensorRTStreamingAdapter:
             # automatic workspace policy; a positive value is a hard cap.
             "workspace_size": workspace_size_bytes,
         }
+        build_started_at = time.perf_counter()
 
         # 4) Export before TensorRT compilation: it fixes the 63-state
         # signature and makes every state transition visible to the compiler.
@@ -230,6 +277,7 @@ class TensorRTStreamingAdapter:
 
             with export_torch_mode():
                 program = torch.export.export(self._step, (x, time_cond, *self._initial_state), strict=True)
+            exported_ops_profile = _dump_exported_ops_from_env(program)
             # Q/DQ nodes define the explicitly quantized INT8 regions.  The
             # enabled precision set controls what TensorRT may choose for the
             # remaining floating-point regions.  Calibration and public I/O
@@ -239,17 +287,21 @@ class TensorRTStreamingAdapter:
             self.engine = torch_tensorrt.dynamo.compile(program, **compile_kwargs)
         else:
             program = torch.export.export(self._step, (x, time_cond, *self._initial_state), strict=True)
+            exported_ops_profile = _dump_exported_ops_from_env(program)
             if precision == "fp16":
                 compile_kwargs["enabled_precisions"] = {torch.float16}
             # Omit enabled_precisions for FP32: TensorRT's default is its
             # native FP32 path, without allowing FP16 tactics implicitly.
             self.engine = torch_tensorrt.dynamo.compile(program, **compile_kwargs)
+        self.engine_build_s = time.perf_counter() - build_started_at
         # 5) Self-diagnostics recorded at build time: partition inventory,
         # engine-vs-eager agreement and micro-profiles all land in the
         # benchmark rows so a bad build is visible in the history.
         self.compilation_profile = self._inspect_compiled_engine()
+        self.compilation_profile.update(exported_ops_profile)
         self.compilation_profile.update(
             {
+                "engine_build_s": self.engine_build_s,
                 "optimization_level": optimization_level,
                 "num_avg_timing_iters": num_avg_timing_iters,
                 "workspace_size_bytes": workspace_size_bytes,
@@ -257,6 +309,7 @@ class TensorRTStreamingAdapter:
                 "workspace_policy": "automatic" if workspace_size_bytes == 0 else "explicit_cap",
             }
         )
+        self.compilation_profile.update(self._dump_layer_info_from_env())
         # ``use_cuda_graph`` deliberately does *not* enable Torch-TensorRT's
         # engine-only CUDA-graph wrapper here.  The benchmark captures a
         # single native CUDA graph around the whole recurrent solver: RI
@@ -264,6 +317,7 @@ class TensorRTStreamingAdapter:
         # Nesting an engine graph inside that outer graph would neither cover
         # the surrounding work nor give us a meaningful latency comparison.
         self.validation = self._validate_one_step(x, time_cond)
+        self.compilation_profile.update(self._profile_one_engine_run_from_env(x, time_cond))
         self.runtime_profile = self._profile_engine(x, time_cond)
         self.stage_profile = self._profile_full_solver_stages(x, time_cond)
 
@@ -298,6 +352,94 @@ class TensorRTStreamingAdapter:
             "pytorch_fallback_partition_count": len(fallbacks),
             "tensorrt_partitions": lowered,
             "pytorch_fallback_partitions": fallbacks,
+        }
+
+    def _runtime_engine_modules(self):
+        """Return the concrete Torch-TensorRT runtime partitions."""
+        return [
+            (name, module)
+            for name, module in self.engine.named_modules()
+            if name and callable(getattr(module, "get_layer_info", None))
+        ]
+
+    def _dump_layer_info_from_env(self) -> dict[str, Any]:
+        """Persist TensorRT engine-inspector JSON when a profile requests it."""
+        output_path = os.environ.get("STREAMFM_TRT_LAYER_INFO_PATH", "")
+        if not output_path:
+            return {"engine_layer_info_available": False}
+
+        partitions = []
+        errors = []
+        for name, module in self._runtime_engine_modules():
+            try:
+                raw = module.get_layer_info()
+                try:
+                    layer_info = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    layer_info = raw
+                partitions.append({"name": name, "layer_info": layer_info})
+            except Exception as exc:  # Inspector failure must not invalidate inference.
+                errors.append({"name": name, "error": f"{type(exc).__name__}: {exc}"})
+
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"partitions": partitions, "errors": errors}, indent=2),
+            encoding="utf-8",
+        )
+        return {
+            "engine_layer_info_available": bool(partitions),
+            "engine_layer_info_partition_count": len(partitions),
+            "engine_layer_info_error_count": len(errors),
+            "engine_layer_info_path": str(path),
+        }
+
+    def _profile_one_engine_run_from_env(self, x, time_cond) -> dict[str, Any]:
+        """Collect one TensorRT per-layer timing trace outside the benchmark."""
+        import torch
+
+        output_dir = os.environ.get("STREAMFM_TRT_LAYER_PROFILE_DIR", "")
+        if not output_dir:
+            return {"engine_layer_profile_requested": False}
+
+        path = Path(output_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        modules = [
+            (name, module)
+            for name, module in self._runtime_engine_modules()
+            if callable(getattr(module, "enable_profiling", None))
+            and callable(getattr(module, "disable_profiling", None))
+        ]
+        errors = []
+        enabled = []
+        try:
+            for name, module in modules:
+                try:
+                    module.enable_profiling(str(path))
+                    enabled.append((name, module))
+                except Exception as exc:
+                    errors.append({"name": name, "error": f"{type(exc).__name__}: {exc}"})
+            if enabled:
+                with torch.inference_mode():
+                    state = tuple(tensor.clone() for tensor in self._initial_state)
+                    self.engine(x, time_cond, *state)
+                    torch.cuda.synchronize()
+        finally:
+            for name, module in enabled:
+                try:
+                    module.disable_profiling()
+                except Exception as exc:
+                    errors.append({"name": name, "error": f"{type(exc).__name__}: {exc}"})
+
+        return {
+            "engine_layer_profile_requested": True,
+            "engine_layer_profile_partition_count": len(enabled),
+            "engine_layer_profile_error_count": len(errors),
+            "engine_layer_profile_dir": str(path),
+            "engine_layer_profile_files": sorted(
+                item.name for item in path.glob("**/*") if item.is_file()
+            ),
+            "engine_layer_profile_errors": errors,
         }
 
     def _validate_one_step(self, x, time_cond) -> dict[str, float]:
