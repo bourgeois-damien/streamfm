@@ -147,7 +147,7 @@ Paramètres principaux :
 - `--task` : `stftpr`, `bwe`, `derev`, `lyra`, `se`.
 - `--part` : `model`, `predictor`, `flow`.
 - `--pipeline` : `model_only` (bloc de modèle uniquement) ou `audio` (pipeline audio complet).
-- `--execution` : `auto`, `eager`, `compiled`, `cuda_graph`.
+- `--execution` : `auto`, `eager`, `compiled`, `cuda_graph`, `tensorrt`, `tensorrt_cuda_graph` (les deux modes TensorRT nécessitent CUDA et `--dtype fp32`/`fp16` ; `tensorrt_cuda_graph` rejoue en plus le solveur complet en CUDA Graph).
 - `--steps` : nombre de pas du flow, séparés par des virgules si besoin.
 - `--iterations` : nombre de frames mesurées ; utiliser `--audio-duration-s` pour piloter la durée au lieu du nombre d’itérations.
 - `--warmup` : nombre de frames de chauffe.

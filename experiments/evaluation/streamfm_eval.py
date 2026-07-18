@@ -417,7 +417,7 @@ def _score_after_run(args: argparse.Namespace, *, backend: str, run_name: str, m
     """Run score_manifest.py with options matching the completed eval run."""
     command = [
         sys.executable,
-        str(REPO_ROOT / "experiments" / "evaluation" / "score_manifest.py"),
+        str(REPO_ROOT / "experiments" / "evaluation" / "scoring" / "score_manifest.py"),
         "--backend",
         backend,
         "--limit",
