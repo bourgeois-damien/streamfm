@@ -178,12 +178,30 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--iterations", type=int, default=100, help="Measured frame count. Use --audio-duration-s for duration-based audio runs.")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--audio-duration-s", type=float, default=0.0, help="If >0 with --pipeline audio, override --iterations and process this duration.")
-    parser.add_argument("--dtype", default="fp32", choices=("fp32", "fp16", "bf16"))
+    parser.add_argument(
+        "--dtype",
+        default="fp32",
+        choices=("fp32", "fp16", "bf16"),
+        help=(
+            "Floating dtype. For TensorRT INT8, fp32/fp16 selects the allowed "
+            "floating-point fallback; calibration and engine I/O remain FP32."
+        ),
+    )
     parser.add_argument(
         "--matmul-precision",
         default="high",
         choices=("highest", "high", "medium"),
         help="torch.set_float32_matmul_precision mode used for float32 matmul kernels.",
+    )
+    parser.add_argument(
+        "--tf32",
+        default="auto",
+        choices=("auto", "on", "off"),
+        help=(
+            "Explicit TF32 policy. Controls cuDNN convolutions in PyTorch and "
+            "TensorRT's disable_tf32 builder setting; matmul precision remains "
+            "controlled separately by --matmul-precision."
+        ),
     )
     parser.add_argument("--ckpt", default="", help="Optional full checkpoint; compressed checkpoints are detected automatically.")
     parser.add_argument("--num-threads", type=int, default=0, help="CPU only. 0 leaves PyTorch default unchanged.")
@@ -216,6 +234,29 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=32,
         help="Calibration mini-batches for static PTQ components.",
+    )
+    parser.add_argument(
+        "--trt-optimization-level",
+        type=int,
+        default=3,
+        choices=range(0, 6),
+        metavar="{0..5}",
+        help="TensorRT builder search level. Higher can improve the engine but increases build time.",
+    )
+    parser.add_argument(
+        "--trt-avg-timing-iters",
+        type=int,
+        default=1,
+        help="TensorRT tactic timing repetitions during engine build (default: 1).",
+    )
+    parser.add_argument(
+        "--trt-workspace-size-mib",
+        type=int,
+        default=0,
+        help=(
+            "TensorRT temporary workspace cap in MiB. 0 keeps TensorRT's automatic, "
+            "effectively unbounded-by-the-runner policy."
+        ),
     )
     parser.add_argument("--output-json", default="")
     parser.add_argument("--history-json", default="")
@@ -282,6 +323,7 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
         warmup=args.warmup,
         model_dtype_name=args.dtype,
         float32_matmul_precision=args.matmul_precision,
+        tf32_mode=args.tf32,
         device=device,
         paths=paths,
         backend="local",
@@ -298,6 +340,9 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
         checkpoint_name=args.ckpt,
         ptq_int8=args.ptq_int8,
         ptq_calib_steps=args.ptq_calib_steps,
+        tensorrt_optimization_level=args.trt_optimization_level,
+        tensorrt_num_avg_timing_iters=args.trt_avg_timing_iters,
+        tensorrt_workspace_size_mib=args.trt_workspace_size_mib,
     )
     _save_audio_results(results, args, backend="local", hardware=hardware)
     record_benchmark_results(
@@ -323,6 +368,7 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
             "audio_duration_s": args.audio_duration_s,
             "model_dtype": args.dtype,
             "matmul_precision": args.matmul_precision,
+            "tf32": args.tf32,
             "ckpt": args.ckpt,
             "num_threads": args.num_threads,
             "num_interop_threads": args.num_interop_threads,
@@ -330,6 +376,9 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
             "preallocate_model_buffers": args.preallocate_model_buffers,
             "ptq_int8": args.ptq_int8,
             "ptq_calib_steps": args.ptq_calib_steps,
+            "trt_optimization_level": args.trt_optimization_level,
+            "trt_avg_timing_iters": args.trt_avg_timing_iters,
+            "trt_workspace_size_mib": args.trt_workspace_size_mib,
             "save_audio": args.save_audio,
             "audio_output_dir": args.audio_output_dir,
             "input_audio": args.input_audio_path,
@@ -379,6 +428,14 @@ def _run_modal(args: argparse.Namespace, hardware: str) -> None:
         args.dtype,
         "--matmul-precision",
         args.matmul_precision,
+        "--tf32",
+        args.tf32,
+        "--trt-optimization-level",
+        str(args.trt_optimization_level),
+        "--trt-avg-timing-iters",
+        str(args.trt_avg_timing_iters),
+        "--trt-workspace-size-mib",
+        str(args.trt_workspace_size_mib),
     ]
     command.extend(["--audio-duration-s", str(args.audio_duration_s)])
     if args.ckpt:

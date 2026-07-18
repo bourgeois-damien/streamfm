@@ -122,6 +122,10 @@ def _target_command(
     iterations: int,
     warmup: int,
     memory_format: str,
+    tf32: str,
+    trt_optimization_level: int,
+    trt_avg_timing_iters: int,
+    trt_workspace_size_mib: int,
 ) -> list[str]:
     """Build the streamfm_benchmark CLI invocation that every capture tool below profiles.
 
@@ -158,6 +162,14 @@ def _target_command(
         dtype,
         "--memory-format",
         memory_format,
+        "--tf32",
+        tf32,
+        "--trt-optimization-level",
+        str(trt_optimization_level),
+        "--trt-avg-timing-iters",
+        str(trt_avg_timing_iters),
+        "--trt-workspace-size-mib",
+        str(trt_workspace_size_mib),
         "--preallocate-model-buffers",
     ]
     if ptq_int8:
@@ -176,6 +188,10 @@ def capture_nsys(
     warmup: int,
     profile_frames: int,
     memory_format: str,
+    tf32: str,
+    trt_optimization_level: int,
+    trt_avg_timing_iters: int,
+    trt_workspace_size_mib: int,
     require_full_compilation: bool,
     run_id: str,
 ) -> dict:
@@ -203,6 +219,10 @@ def capture_nsys(
         iterations=iterations,
         warmup=warmup,
         memory_format=memory_format,
+        tf32=tf32,
+        trt_optimization_level=trt_optimization_level,
+        trt_avg_timing_iters=trt_avg_timing_iters,
+        trt_workspace_size_mib=trt_workspace_size_mib,
     )
 
     nsys_command = [
@@ -265,6 +285,10 @@ def capture_nsys(
         "warmup": warmup,
         "profile_frames": profile_frames,
         "memory_format": memory_format,
+        "tf32": tf32,
+        "trt_optimization_level": trt_optimization_level,
+        "trt_avg_timing_iters": trt_avg_timing_iters,
+        "trt_workspace_size_mib": trt_workspace_size_mib,
         "require_full_compilation": require_full_compilation,
         "nsys_exit_code": run.returncode,
         "report_exists": report_path.exists(),
@@ -287,6 +311,10 @@ def capture_ncu(
     warmup: int,
     profile_frames: int,
     memory_format: str,
+    tf32: str,
+    trt_optimization_level: int,
+    trt_avg_timing_iters: int,
+    trt_workspace_size_mib: int,
     require_full_compilation: bool,
     run_id: str,
     ncu_set: str,
@@ -315,6 +343,10 @@ def capture_ncu(
         iterations=iterations,
         warmup=warmup,
         memory_format=memory_format,
+        tf32=tf32,
+        trt_optimization_level=trt_optimization_level,
+        trt_avg_timing_iters=trt_avg_timing_iters,
+        trt_workspace_size_mib=trt_workspace_size_mib,
     )
     command = [
         "ncu",
@@ -358,6 +390,10 @@ def capture_ncu(
         "warmup": warmup,
         "profile_frames": profile_frames,
         "memory_format": memory_format,
+        "tf32": tf32,
+        "trt_optimization_level": trt_optimization_level,
+        "trt_avg_timing_iters": trt_avg_timing_iters,
+        "trt_workspace_size_mib": trt_workspace_size_mib,
         "require_full_compilation": require_full_compilation,
         "ncu_set": ncu_set,
         "launch_skip": launch_skip,
@@ -382,6 +418,10 @@ def capture_torch_trace(
     warmup: int,
     profile_frames: int,
     memory_format: str,
+    tf32: str,
+    trt_optimization_level: int,
+    trt_avg_timing_iters: int,
+    trt_workspace_size_mib: int,
     require_full_compilation: bool,
     run_id: str,
 ) -> dict:
@@ -407,6 +447,10 @@ def capture_torch_trace(
         iterations=iterations,
         warmup=warmup,
         memory_format=memory_format,
+        tf32=tf32,
+        trt_optimization_level=trt_optimization_level,
+        trt_avg_timing_iters=trt_avg_timing_iters,
+        trt_workspace_size_mib=trt_workspace_size_mib,
     )
     run = _run_checked(target, env=env, cwd=REMOTE_ROOT)
     (output_dir / "torch_profile.log").write_text(run.stdout, encoding="utf-8")
@@ -422,6 +466,10 @@ def capture_torch_trace(
         "warmup": warmup,
         "profile_frames": profile_frames,
         "memory_format": memory_format,
+        "tf32": tf32,
+        "trt_optimization_level": trt_optimization_level,
+        "trt_avg_timing_iters": trt_avg_timing_iters,
+        "trt_workspace_size_mib": trt_workspace_size_mib,
         "require_full_compilation": require_full_compilation,
         "target_exit_code": run.returncode,
         "trace_exists": trace_path.exists(),
@@ -443,6 +491,10 @@ def main(
     warmup: int = 10,
     profile_frames: int = 3,
     memory_format: str = "contiguous",
+    tf32: str = "auto",
+    trt_optimization_level: int = 3,
+    trt_avg_timing_iters: int = 1,
+    trt_workspace_size_mib: int = 0,
     require_full_compilation: bool = True,
     output_dir: str = "outputs/nsight_streamfm",
     ncu_set: str = "basic",
@@ -463,8 +515,16 @@ def main(
         raise ValueError("Nsight capture supports dtype=fp32 or fp16.")
     if ptq_int8 and execution != "tensorrt":
         raise ValueError("INT8 profiling requires execution=tensorrt.")
-    if ptq_int8 and dtype != "fp32":
-        raise ValueError("TensorRT INT8 profiling uses dtype=fp32 I/O.")
+    if ptq_int8 and dtype not in {"fp32", "fp16"}:
+        raise ValueError("TensorRT INT8 profiling supports FP32 or FP16 fallback.")
+    if tf32 not in {"auto", "on", "off"}:
+        raise ValueError("tf32 must be auto, on, or off.")
+    if not 0 <= trt_optimization_level <= 5:
+        raise ValueError("trt_optimization_level must be between 0 and 5.")
+    if trt_avg_timing_iters < 1:
+        raise ValueError("trt_avg_timing_iters must be at least 1.")
+    if trt_workspace_size_mib < 0:
+        raise ValueError("trt_workspace_size_mib must be non-negative.")
     if execution == "cuda_graph" and cuda_graph:
         # Native PyTorch CUDA Graph is selected by execution itself; the
         # cuda_graph axis only applies to TensorRT runs, where the target
@@ -482,6 +542,10 @@ def main(
         "warmup": warmup,
         "profile_frames": profile_frames,
         "memory_format": memory_format,
+        "tf32": tf32,
+        "trt_optimization_level": trt_optimization_level,
+        "trt_avg_timing_iters": trt_avg_timing_iters,
+        "trt_workspace_size_mib": trt_workspace_size_mib,
         "require_full_compilation": require_full_compilation,
         "run_id": run_id,
     }

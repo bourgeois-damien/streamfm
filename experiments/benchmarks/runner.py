@@ -13,7 +13,11 @@ import os
 import time
 
 from experiments.core.tensors import apply_model_memory_format, normalize_model_memory_format
-from experiments.core.devices import device_label, normalize_float32_matmul_precision
+from experiments.core.devices import (
+    device_label,
+    normalize_float32_matmul_precision,
+    normalize_tf32_mode,
+)
 from experiments.benchmarks.cuda_graph import (
     benchmark_flow_steps_cuda_graph,
     benchmark_se_flow_cuda_graph,
@@ -39,6 +43,9 @@ from experiments.core.options import (
     resolve_execution,
 )
 from experiments.core.paths import BenchmarkPaths
+
+
+_DEFAULT_CUDNN_ALLOW_TF32: bool | None = None
 
 
 def _float_or_default(value, default: float) -> float:
@@ -156,6 +163,10 @@ def _benchmark_flow_task(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
+    tensorrt_allow_tf32: bool | None = None,
+    tensorrt_optimization_level: int = 3,
+    tensorrt_num_avg_timing_iters: int = 1,
+    tensorrt_workspace_size_bytes: int = 0,
 ) -> tuple[list[dict], float, float]:
     """Load and benchmark a flow-only task (stftpr/bwe/derev/lyra).
 
@@ -165,6 +176,15 @@ def _benchmark_flow_task(
     # 1) Load the backbone, then stack the requested transformations:
     # PTQ INT8 (CPU) -> memory format -> TensorRT adapter (CUDA).
     load_started_at = time.perf_counter()
+    # ModelOpt calibration is deliberately performed in FP32.  For an INT8
+    # run, the user-facing --dtype selects the floating-point fallback that
+    # TensorRT may use internally; the engine I/O remains FP32 so Q/DQ scales
+    # and recurrent-state export keep the already validated contract.
+    int8_fallback_dtype = model_dtype
+    if use_tensorrt and tensorrt_precision == "int8":
+        import torch
+
+        model_dtype = torch.float32
     model, cfg = load_flow_model(device, model_dtype, paths, task=task, checkpoint_name=checkpoint_name or None)
     model, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
         model,
@@ -188,6 +208,11 @@ def _benchmark_flow_task(
             calibration_steps=ptq_calib_steps,
             use_cuda_graph=tensorrt_cuda_graph,
             memory_format=model_memory_format,
+            int8_fallback_dtype=int8_fallback_dtype,
+            allow_tf32=tensorrt_allow_tf32,
+            optimization_level=tensorrt_optimization_level,
+            num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+            workspace_size_bytes=tensorrt_workspace_size_bytes,
         )
         trt_validation = model.validation
         trt_runtime_profile = model.runtime_profile
@@ -677,6 +702,10 @@ def run_internal_benchmark(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
+    tensorrt_allow_tf32: bool | None = None,
+    tensorrt_optimization_level: int = 3,
+    tensorrt_num_avg_timing_iters: int = 1,
+    tensorrt_workspace_size_bytes: int = 0,
 ) -> tuple[list[dict], float, float]:
     """Dispatch a benchmark run by task family: flow backbones vs the three SE variants.
 
@@ -713,6 +742,10 @@ def run_internal_benchmark(
             checkpoint_name=checkpoint_name,
             ptq_int8=ptq_int8,
             ptq_calib_steps=ptq_calib_steps,
+            tensorrt_allow_tf32=tensorrt_allow_tf32,
+            tensorrt_optimization_level=tensorrt_optimization_level,
+            tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+            tensorrt_workspace_size_bytes=tensorrt_workspace_size_bytes,
         )
     if internal_task == "se_predictor":
         return _benchmark_se_predictor_task(
@@ -797,6 +830,10 @@ def run_benchmark(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
+    tf32_mode: str = "auto",
+    tensorrt_optimization_level: int = 3,
+    tensorrt_num_avg_timing_iters: int = 1,
+    tensorrt_workspace_size_mib: int = 0,
 ) -> list[dict]:
     """Run one benchmark end to end; the single entry point shared by local CLI and Modal.
 
@@ -813,6 +850,7 @@ def run_benchmark(
     execution = resolve_execution(execution, device)
     model_memory_format = normalize_model_memory_format(model_memory_format)
     float32_matmul_precision = normalize_float32_matmul_precision(float32_matmul_precision)
+    tf32_mode = normalize_tf32_mode(tf32_mode)
 
     if execution in {"cuda_graph", "tensorrt", "tensorrt_cuda_graph"} and device.type != "cuda":
         raise ValueError(f"execution={execution} requires a CUDA device.")
@@ -820,8 +858,18 @@ def run_benchmark(
     trt_int8 = is_tensorrt and ptq_int8.strip().lower() == "tensorrt"
     if is_tensorrt and not trt_int8 and model_dtype_name.lower() not in {"fp16", "fp32"}:
         raise ValueError("TensorRT requires --dtype fp16 or --dtype fp32.")
-    if trt_int8 and model_dtype_name.lower() != "fp32":
-        raise ValueError("TensorRT INT8 PTQ requires --dtype fp32 for its model I/O.")
+    if trt_int8 and model_dtype_name.lower() not in {"fp32", "fp16"}:
+        raise ValueError(
+            "TensorRT INT8 PTQ supports --dtype fp32 or fp16; the dtype selects "
+            "the floating-point fallback while calibration and engine I/O stay FP32."
+        )
+    if not 0 <= tensorrt_optimization_level <= 5:
+        raise ValueError("TensorRT optimization level must be between 0 and 5.")
+    if tensorrt_num_avg_timing_iters < 1:
+        raise ValueError("TensorRT average timing iterations must be at least 1.")
+    if tensorrt_workspace_size_mib < 0:
+        raise ValueError("TensorRT workspace size must be non-negative.")
+    tensorrt_workspace_size_bytes = tensorrt_workspace_size_mib * 1024 * 1024
 
     # 2) Process-level setup. chdir to the repo root because checkpoint/config
     # loading uses relative paths; matmul precision trades fp32 accuracy for
@@ -829,6 +877,16 @@ def run_benchmark(
     started_at = time.perf_counter()
     os.chdir(paths.repo_root)
     torch.set_float32_matmul_precision(float32_matmul_precision)
+    global _DEFAULT_CUDNN_ALLOW_TF32
+    if device.type == "cuda":
+        if _DEFAULT_CUDNN_ALLOW_TF32 is None:
+            _DEFAULT_CUDNN_ALLOW_TF32 = bool(torch.backends.cudnn.allow_tf32)
+        torch.backends.cudnn.allow_tf32 = (
+            _DEFAULT_CUDNN_ALLOW_TF32 if tf32_mode == "auto" else tf32_mode == "on"
+        )
+    effective_cudnn_tf32 = (
+        bool(torch.backends.cudnn.allow_tf32) if device.type == "cuda" else None
+    )
     if device.type == "cpu":
         # Interop threads can only be set once per process, and only before parallel work.
         # Batch sweeps reuse the same Modal/local process across trials, so ignore repeat sets.
@@ -883,6 +941,10 @@ def run_benchmark(
             checkpoint_name=checkpoint_name,
             ptq_int8=ptq_int8,
             ptq_calib_steps=ptq_calib_steps,
+            tensorrt_allow_tf32=(None if tf32_mode == "auto" else tf32_mode == "on"),
+            tensorrt_optimization_level=tensorrt_optimization_level,
+            tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+            tensorrt_workspace_size_bytes=tensorrt_workspace_size_bytes,
         )
 
     # 3) Run the timing loops, optionally under the PyTorch profiler. The
@@ -933,6 +995,11 @@ def run_benchmark(
         row["total_s"] = total_s
         row["requested_model_dtype"] = model_dtype_name.lower()
         row["float32_matmul_precision"] = float32_matmul_precision
+        row["tf32_mode"] = tf32_mode
+        row["cudnn_allow_tf32"] = effective_cudnn_tf32
+        row["tensorrt_optimization_level"] = tensorrt_optimization_level if is_tensorrt else None
+        row["tensorrt_num_avg_timing_iters"] = tensorrt_num_avg_timing_iters if is_tensorrt else None
+        row["tensorrt_workspace_size_mib"] = tensorrt_workspace_size_mib if is_tensorrt else None
         row["requested_task"] = resolved["requested_task"]
         row["requested_part"] = resolved["requested_part"]
         row["requested_pipeline"] = resolved["requested_pipeline"]

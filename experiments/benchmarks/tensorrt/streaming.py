@@ -134,6 +134,11 @@ class TensorRTStreamingAdapter:
         calibration_steps: int = 16,
         use_cuda_graph: bool = False,
         memory_format: str = "contiguous",
+        int8_fallback_dtype=None,
+        allow_tf32: bool | None = None,
+        optimization_level: int = 3,
+        num_avg_timing_iters: int = 1,
+        workspace_size_bytes: int = 0,
     ):
         import torch
 
@@ -148,9 +153,19 @@ class TensorRTStreamingAdapter:
             raise ValueError("TensorRT FP16 requires --dtype fp16.")
         if precision == "int8" and dtype != torch.float32:
             raise ValueError(
-                "TensorRT INT8 PTQ uses FP32 model I/O and requires --dtype fp32; "
-                "the engine quantizes supported operations internally."
+                "TensorRT INT8 PTQ calibrates and exports with FP32 model I/O; "
+                "the requested floating-point fallback is configured separately."
             )
+        if int8_fallback_dtype is None:
+            int8_fallback_dtype = torch.float32
+        if precision == "int8" and int8_fallback_dtype not in {torch.float32, torch.float16}:
+            raise ValueError("TensorRT INT8 fallback must be FP32 or FP16.")
+        if not 0 <= optimization_level <= 5:
+            raise ValueError("TensorRT optimization level must be between 0 and 5.")
+        if num_avg_timing_iters < 1:
+            raise ValueError("TensorRT average timing iterations must be at least 1.")
+        if workspace_size_bytes < 0:
+            raise ValueError("TensorRT workspace size must be non-negative.")
 
         try:
             import torch_tensorrt
@@ -166,6 +181,11 @@ class TensorRTStreamingAdapter:
         self.precision = precision
         self.use_cuda_graph = use_cuda_graph
         self.dtype = dtype
+        self.int8_fallback_dtype = int8_fallback_dtype
+        self.allow_tf32 = allow_tf32
+        self.optimization_level = optimization_level
+        self.num_avg_timing_iters = num_avg_timing_iters
+        self.workspace_size_bytes = workspace_size_bytes
         self.memory_format = memory_format
         self.input_freqs = int(self.model.input_freqs)
         self.input_channels = int(self.model.input_layer.in_channels)
@@ -188,6 +208,20 @@ class TensorRTStreamingAdapter:
             1, self.input_channels, self.input_freqs, 1, device="cuda", dtype=dtype
         ).contiguous(memory_format=torch_memory_format)
         time_cond = torch.full((1,), 0.5, device="cuda", dtype=dtype)
+        compile_kwargs = {
+            "arg_inputs": [x, time_cond, *self._initial_state],
+            "min_block_size": 1,
+            "require_full_compilation": (
+                os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
+            ),
+            "disable_tf32": (allow_tf32 is False),
+            "optimization_level": optimization_level,
+            "num_avg_timing_iters": num_avg_timing_iters,
+            # Torch-TensorRT 2.7 only calls set_memory_pool_limit when this
+            # value is nonzero.  Zero therefore preserves TensorRT's own
+            # automatic workspace policy; a positive value is a hard cap.
+            "workspace_size": workspace_size_bytes,
+        }
 
         # 4) Export before TensorRT compilation: it fixes the 63-state
         # signature and makes every state transition visible to the compiler.
@@ -196,23 +230,15 @@ class TensorRTStreamingAdapter:
 
             with export_torch_mode():
                 program = torch.export.export(self._step, (x, time_cond, *self._initial_state), strict=True)
-            self.engine = torch_tensorrt.dynamo.compile(
-                program,
-                arg_inputs=[x, time_cond, *self._initial_state],
-                min_block_size=1,
-                require_full_compilation=(
-                    os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
-                ),
-            )
+            # Q/DQ nodes define the explicitly quantized INT8 regions.  The
+            # enabled precision set controls what TensorRT may choose for the
+            # remaining floating-point regions.  Calibration and public I/O
+            # stay FP32 even when those regions are allowed to use FP16.
+            enabled_precisions = {torch.int8, self.int8_fallback_dtype}
+            compile_kwargs["enabled_precisions"] = enabled_precisions
+            self.engine = torch_tensorrt.dynamo.compile(program, **compile_kwargs)
         else:
             program = torch.export.export(self._step, (x, time_cond, *self._initial_state), strict=True)
-            compile_kwargs = {
-                "arg_inputs": [x, time_cond, *self._initial_state],
-                "min_block_size": 1,
-                "require_full_compilation": (
-                    os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
-                ),
-            }
             if precision == "fp16":
                 compile_kwargs["enabled_precisions"] = {torch.float16}
             # Omit enabled_precisions for FP32: TensorRT's default is its
@@ -222,6 +248,15 @@ class TensorRTStreamingAdapter:
         # engine-vs-eager agreement and micro-profiles all land in the
         # benchmark rows so a bad build is visible in the history.
         self.compilation_profile = self._inspect_compiled_engine()
+        self.compilation_profile.update(
+            {
+                "optimization_level": optimization_level,
+                "num_avg_timing_iters": num_avg_timing_iters,
+                "workspace_size_bytes": workspace_size_bytes,
+                "workspace_size_mib": workspace_size_bytes / (1024.0 * 1024.0),
+                "workspace_policy": "automatic" if workspace_size_bytes == 0 else "explicit_cap",
+            }
+        )
         # ``use_cuda_graph`` deliberately does *not* enable Torch-TensorRT's
         # engine-only CUDA-graph wrapper here.  The benchmark captures a
         # single native CUDA graph around the whole recurrent solver: RI
@@ -255,6 +290,9 @@ class TensorRTStreamingAdapter:
             "require_full_compilation": (
                 os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
             ),
+            "allow_tf32": self.allow_tf32,
+            "int8_fallback_dtype": str(self.int8_fallback_dtype).replace("torch.", ""),
+            "io_dtype": str(self.dtype).replace("torch.", ""),
             "compiled_module_types": module_types,
             "tensorrt_partition_count": len(lowered),
             "pytorch_fallback_partition_count": len(fallbacks),
@@ -283,6 +321,8 @@ class TensorRTStreamingAdapter:
             "output_max_abs_diff": float(output_delta.max()),
             "state_max_abs_diff": state_max,
             "state_tensor_count": len(self._initial_state),
+            "int8_fallback_dtype": str(self.int8_fallback_dtype).replace("torch.", ""),
+            "io_dtype": str(self.dtype).replace("torch.", ""),
         }
 
     def _profile_engine(self, x, time_cond, *, warmup: int = 10, iterations: int = 100) -> dict[str, float]:
@@ -455,6 +495,11 @@ def build_tensorrt_streaming_adapter(
     calibration_steps: int = 16,
     use_cuda_graph: bool = False,
     memory_format: str = "contiguous",
+    int8_fallback_dtype=None,
+    allow_tf32: bool | None = None,
+    optimization_level: int = 3,
+    num_avg_timing_iters: int = 1,
+    workspace_size_bytes: int = 0,
 ):
     """Compile a StreamFM backbone for recurrent, one-frame TensorRT inference."""
     return TensorRTStreamingAdapter(
@@ -464,6 +509,11 @@ def build_tensorrt_streaming_adapter(
         calibration_steps=calibration_steps,
         use_cuda_graph=use_cuda_graph,
         memory_format=memory_format,
+        int8_fallback_dtype=int8_fallback_dtype,
+        allow_tf32=allow_tf32,
+        optimization_level=optimization_level,
+        num_avg_timing_iters=num_avg_timing_iters,
+        workspace_size_bytes=workspace_size_bytes,
     )
 
 

@@ -7,8 +7,10 @@ Selectable components (comma-separated):
 - ``causal_conv``: static INT8 on ``CausalConv2d`` (streaming-aware wrapper).
 - ``all``: ``linear,conv,causal_conv``.
 
-Prefer ``execution=eager`` and ``dtype=fp32`` on CPU. Speedups need a real quantized
-backend (``qnnpack`` on ARM/macOS, ``x86`` on typical Linux x86_64).
+Prefer ``execution=eager`` on CPU. ``dtype=fp32`` keeps the historical float
+fallback, while ``dtype=fp16`` keeps unquantized modules and streaming state in
+FP16 and inserts FP16/FP32 casts around quantized kernels. Speedups need a real
+quantized backend (``qnnpack`` on ARM/macOS, ``x86`` on typical Linux x86_64).
 """
 
 from __future__ import annotations
@@ -144,11 +146,40 @@ def _static_quantize_conv_float_io(
     return converted
 
 
+class QuantizedFallbackWrapper(nn.Module):
+    """Run a float-I/O quantized module behind an explicit fallback boundary.
+
+    PyTorch eager quantized kernels consume and produce FP32 tensors at their
+    public boundary.  The rest of a mixed model may nevertheless use FP16: cast
+    the input to FP32 immediately before the quantized module and cast its output
+    back to the requested fallback dtype.
+    """
+
+    def __init__(self, quantized_module: nn.Module, fallback_dtype: torch.dtype):
+        super().__init__()
+        if fallback_dtype not in {torch.float16, torch.float32}:
+            raise ValueError("INT8 fallback dtype must be torch.float16 or torch.float32.")
+        self.quantized_module = quantized_module
+        self.fallback_dtype = fallback_dtype
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        output = self.quantized_module(x.float())
+        return output.to(dtype=self.fallback_dtype)
+
+
 class QuantizedCausalConv2d(nn.Module):
     """Streaming-capable float I/O wrapper around quantized conv + stubs."""
 
-    def __init__(self, float_conv: nn.Module, quantized_wrapper: nn.Module):
+    def __init__(
+        self,
+        float_conv: nn.Module,
+        quantized_wrapper: nn.Module,
+        *,
+        fallback_dtype: torch.dtype = torch.float32,
+    ):
         super().__init__()
+        if fallback_dtype not in {torch.float16, torch.float32}:
+            raise ValueError("INT8 fallback dtype must be torch.float16 or torch.float32.")
         self.time_padding = tuple(float_conv.time_padding)
         self.pad_freq = int(float_conv.pad_freq)
         self.dilation = tuple(float_conv.dilation)
@@ -158,6 +189,7 @@ class QuantizedCausalConv2d(nn.Module):
         self.out_channels = int(float_conv.out_channels)
         self.depthwise_separable = bool(getattr(float_conv, "depthwise_separable", False))
         self.Tbuf = int(float_conv.Tbuf)
+        self.fallback_dtype = fallback_dtype
         # Keep quant/conv/dequant: quantized conv kernels require quantized inputs.
         self.quant = quantized_wrapper.quant
         self.qconv = quantized_wrapper.conv
@@ -170,7 +202,8 @@ class QuantizedCausalConv2d(nn.Module):
         _register_quantized_causal_as_streaming()
 
     def _run_qconv(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dequant(self.qconv(self.quant(x)))
+        output = self.dequant(self.qconv(self.quant(x.float())))
+        return output.to(dtype=self.fallback_dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.pad(x, self.time_padding)
@@ -180,12 +213,12 @@ class QuantizedCausalConv2d(nn.Module):
         weight = self.qconv.weight() if callable(self.qconv.weight) else self.qconv.weight
         device = weight.device
         xbuf_shape = (self.in_channels, input_freqs, self.Tbuf)
-        return (torch.zeros(xbuf_shape, dtype=torch.float32, device=device),)
+        return (torch.zeros(xbuf_shape, dtype=self.fallback_dtype, device=device),)
 
     def forward_step(self, x: torch.Tensor, *, state: tuple) -> tuple[torch.Tensor, tuple]:
         xbuf, = state
-        if xbuf.device != x.device:
-            xbuf = xbuf.to(device=x.device)
+        if xbuf.device != x.device or xbuf.dtype != self.fallback_dtype:
+            xbuf = xbuf.to(device=x.device, dtype=self.fallback_dtype)
         xbuf = xbuf.clone()
         xbuf[..., :-1] = xbuf[..., 1:]
         xbuf[..., :, -1] = x[0, :, :, 0]
@@ -285,7 +318,35 @@ def _replace_modules(root: nn.Module, mapping: dict[int, nn.Module]) -> nn.Modul
     return root
 
 
-def apply_dynamic_linear_ptq_(module: nn.Module) -> nn.Module:
+def _cast_float_fallback_state_(module: nn.Module, dtype: torch.dtype) -> nn.Module:
+    """Cast ordinary floating state while preserving quantized subtrees."""
+    if dtype == torch.float32:
+        return module
+    if dtype != torch.float16:
+        raise ValueError("INT8 fallback dtype must be torch.float16 or torch.float32.")
+
+    def cast_tensor(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.to(dtype=dtype) if tensor.is_floating_point() else tensor
+
+    def visit(current: nn.Module) -> None:
+        if isinstance(current, (QuantizedFallbackWrapper, QuantizedCausalConv2d)):
+            return
+        # Apply only to parameters/buffers owned by this module. Recursing with
+        # Module.half() would also rewrite quantizer scale buffers and packed
+        # quantized submodules.
+        current._apply(cast_tensor, recurse=False)
+        for child in current.children():
+            visit(child)
+
+    visit(module)
+    return module
+
+
+def apply_dynamic_linear_ptq_(
+    module: nn.Module,
+    *,
+    fallback_dtype: torch.dtype = torch.float32,
+) -> nn.Module:
     """Replace all ``nn.Linear`` children with dynamically quantized Linears."""
     quantized = torch.ao.quantization.quantize_dynamic(
         module,
@@ -301,7 +362,11 @@ def apply_dynamic_linear_ptq_(module: nn.Module) -> nn.Module:
         src_mod = src[name]
         # PyTorch keeps the class __name__ as "Linear"; detect via module path.
         if type(src_mod).__module__.startswith("torch.ao.nn.quantized"):
-            mapping[id(child)] = src_mod
+            mapping[id(child)] = (
+                QuantizedFallbackWrapper(src_mod, fallback_dtype)
+                if fallback_dtype != torch.float32
+                else src_mod
+            )
     return _replace_modules(module, mapping)
 
 
@@ -311,6 +376,7 @@ def apply_static_plain_conv_ptq_(
     engine: str,
     calibration_runner: Callable[[], None],
     precollected_inputs: dict[int, list[torch.Tensor]] | None = None,
+    fallback_dtype: torch.dtype = torch.float32,
 ) -> nn.Module:
     """Statically quantize exact ``nn.Conv2d`` modules (not CausalConv2d subclasses)."""
     from sgmse.backbones.streaming_unet import CausalConv2d
@@ -327,7 +393,12 @@ def apply_static_plain_conv_ptq_(
         if not samples:
             c_in, _, k_h, k_w = target.weight.shape
             samples = [torch.randn(1, c_in, max(8, k_h * 4), max(4, k_w * 4))]
-        replacements[id(target)] = _static_quantize_conv_float_io(target, samples[:64], engine=engine)
+        quantized = _static_quantize_conv_float_io(target, samples[:64], engine=engine)
+        replacements[id(target)] = (
+            QuantizedFallbackWrapper(quantized, fallback_dtype)
+            if fallback_dtype != torch.float32
+            else quantized
+        )
     return _replace_modules(module, replacements)
 
 
@@ -337,6 +408,7 @@ def apply_static_causal_conv_ptq_(
     engine: str,
     calibration_runner: Callable[[], None],
     precollected_inputs: dict[int, list[torch.Tensor]] | None = None,
+    fallback_dtype: torch.dtype = torch.float32,
 ) -> nn.Module:
     """Statically quantize ``CausalConv2d`` modules with a streaming wrapper."""
     from sgmse.backbones.streaming_unet import CausalConv2d
@@ -355,7 +427,11 @@ def apply_static_causal_conv_ptq_(
         # CausalConv2d.forward pads time before the inner conv; hooks see pre-pad inputs.
         padded = [F.pad(sample, tuple(target.time_padding)) for sample in samples[:64]]
         qwrap = _static_quantize_conv_float_io(target, padded, engine=engine)
-        replacements[id(target)] = QuantizedCausalConv2d(target, qwrap)
+        replacements[id(target)] = QuantizedCausalConv2d(
+            target,
+            qwrap,
+            fallback_dtype=fallback_dtype,
+        )
     return _replace_modules(module, replacements)
 
 
@@ -366,6 +442,7 @@ def apply_ptq_int8_(
     engine: str | None = None,
     calib_steps: int = 32,
     calibration_runner: Callable[[], None] | None = None,
+    fallback_dtype: torch.dtype = torch.float32,
 ) -> nn.Module:
     """Apply selected INT8 PTQ transforms and return the (CPU) module."""
     from sgmse.backbones.streaming_unet import CausalConv2d
@@ -373,6 +450,8 @@ def apply_ptq_int8_(
     selected = parse_ptq_components(components)
     if not selected:
         return module
+    if fallback_dtype not in {torch.float16, torch.float32}:
+        raise ValueError("INT8 fallback dtype must be torch.float16 or torch.float32.")
 
     param = next(module.parameters(), None)
     if param is not None and param.dtype != torch.float32:
@@ -402,13 +481,14 @@ def apply_ptq_int8_(
         precollected = _collect_module_inputs(module, plain_targets + causal_targets, runner)
 
     if "linear" in selected:
-        module = apply_dynamic_linear_ptq_(module)
+        module = apply_dynamic_linear_ptq_(module, fallback_dtype=fallback_dtype)
     if needs_plain:
         module = apply_static_plain_conv_ptq_(
             module,
             engine=chosen_engine,
             calibration_runner=runner,
             precollected_inputs=precollected,
+            fallback_dtype=fallback_dtype,
         )
     if needs_causal:
         module = apply_static_causal_conv_ptq_(
@@ -416,12 +496,16 @@ def apply_ptq_int8_(
             engine=chosen_engine,
             calibration_runner=runner,
             precollected_inputs=precollected,
+            fallback_dtype=fallback_dtype,
         )
+
+    module = _cast_float_fallback_state_(module, fallback_dtype)
 
     module._streamfm_ptq_int8 = {  # type: ignore[attr-defined]
         "components": list(selected),
         "engine": chosen_engine,
         "calib_steps": int(calib_steps),
+        "fallback_dtype": str(fallback_dtype).replace("torch.", ""),
     }
     return module.eval()
 
@@ -431,6 +515,7 @@ def ptq_transform_fn(
     *,
     engine: str | None = None,
     calib_steps: int = 32,
+    fallback_dtype: torch.dtype = torch.float32,
 ) -> Callable[[nn.Module], nn.Module]:
     """Return a ``transform_backbone_``-compatible PTQ transform."""
 
@@ -440,6 +525,7 @@ def ptq_transform_fn(
             components,
             engine=engine,
             calib_steps=calib_steps,
+            fallback_dtype=fallback_dtype,
         )
 
     return _transform

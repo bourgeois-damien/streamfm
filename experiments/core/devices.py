@@ -60,3 +60,16 @@ def normalize_float32_matmul_precision(precision: str) -> str:
     if normalized not in {"highest", "high", "medium"}:
         raise ValueError("Unsupported matmul precision. Use 'highest', 'high', or 'medium'.")
     return normalized
+
+
+def normalize_tf32_mode(mode: str) -> str:
+    """Normalize the explicit TF32 policy shared by PyTorch and TensorRT runs.
+
+    ``auto`` preserves the backend default, ``on`` permits TF32, and ``off``
+    forbids it.  Matmul precision remains a separate control because
+    ``torch.set_float32_matmul_precision`` does not govern cuDNN convolutions.
+    """
+    normalized = mode.lower().replace("-", "_")
+    if normalized not in {"auto", "on", "off"}:
+        raise ValueError("Unsupported TF32 mode. Use 'auto', 'on', or 'off'.")
+    return normalized

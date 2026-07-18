@@ -285,6 +285,10 @@ def _run_modal_benchmark(
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
     float32_matmul_precision: str = "high",
+    tf32_mode: str = "auto",
+    tensorrt_optimization_level: int = 3,
+    tensorrt_num_avg_timing_iters: int = 1,
+    tensorrt_workspace_size_mib: int = 0,
 ) -> list[dict]:
     """Run one benchmark inside Modal on CPU or CUDA."""
     # Keep the PyTorch benchmark runner inside the remote function.  The Modal
@@ -330,6 +334,10 @@ def _run_modal_benchmark(
         checkpoint_name=checkpoint_name,
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
+        tf32_mode=tf32_mode,
+        tensorrt_optimization_level=tensorrt_optimization_level,
+        tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+        tensorrt_workspace_size_mib=tensorrt_workspace_size_mib,
     )
     # For normal benchmark runs the payload is metadata only.  Round-trip it
     # through JSON so a lightweight local Modal CLI need not have PyTorch just
@@ -344,7 +352,7 @@ def _run_modal_benchmark(
 # decorator at definition time, so the tiers cannot share a single function.
 # MODAL_FUNCTIONS below maps the hardware name back to the right one.
 @app.function(timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
-def benchmark_cpu(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high"):
+def benchmark_cpu(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high", tf32_mode: str = "auto", tensorrt_optimization_level: int = 3, tensorrt_num_avg_timing_iters: int = 1, tensorrt_workspace_size_mib: int = 0):
     """Run the selected benchmark on Modal CPU."""
     return _run_modal_benchmark(
         hardware="CPU",
@@ -369,11 +377,15 @@ def benchmark_cpu(task: str, part: str, pipeline: str, execution: str, steps: st
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
         float32_matmul_precision=float32_matmul_precision,
+        tf32_mode=tf32_mode,
+        tensorrt_optimization_level=tensorrt_optimization_level,
+        tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+        tensorrt_workspace_size_mib=tensorrt_workspace_size_mib,
     )
 
 
-@app.function(gpu="T4", timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
-def benchmark_t4(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high"):
+@app.function(gpu="T4", timeout=7200, volumes={VOLUME_ROOT: CACHE_VOLUME})
+def benchmark_t4(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high", tf32_mode: str = "auto", tensorrt_optimization_level: int = 3, tensorrt_num_avg_timing_iters: int = 1, tensorrt_workspace_size_mib: int = 0):
     """Run the selected benchmark on an NVIDIA T4."""
     return _run_modal_benchmark(
         hardware="T4",
@@ -398,11 +410,15 @@ def benchmark_t4(task: str, part: str, pipeline: str, execution: str, steps: str
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
         float32_matmul_precision=float32_matmul_precision,
+        tf32_mode=tf32_mode,
+        tensorrt_optimization_level=tensorrt_optimization_level,
+        tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+        tensorrt_workspace_size_mib=tensorrt_workspace_size_mib,
     )
 
 
-@app.function(gpu="L4", timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
-def benchmark_l4(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high"):
+@app.function(gpu="L4", timeout=7200, volumes={VOLUME_ROOT: CACHE_VOLUME})
+def benchmark_l4(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high", tf32_mode: str = "auto", tensorrt_optimization_level: int = 3, tensorrt_num_avg_timing_iters: int = 1, tensorrt_workspace_size_mib: int = 0):
     """Run the selected benchmark on an NVIDIA L4."""
     return _run_modal_benchmark(
         hardware="L4",
@@ -427,11 +443,15 @@ def benchmark_l4(task: str, part: str, pipeline: str, execution: str, steps: str
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
         float32_matmul_precision=float32_matmul_precision,
+        tf32_mode=tf32_mode,
+        tensorrt_optimization_level=tensorrt_optimization_level,
+        tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+        tensorrt_workspace_size_mib=tensorrt_workspace_size_mib,
     )
 
 
-@app.function(gpu="L40S", timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
-def benchmark_l40s(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high"):
+@app.function(gpu="L40S", timeout=7200, volumes={VOLUME_ROOT: CACHE_VOLUME})
+def benchmark_l40s(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high", tf32_mode: str = "auto", tensorrt_optimization_level: int = 3, tensorrt_num_avg_timing_iters: int = 1, tensorrt_workspace_size_mib: int = 0):
     """Run the selected benchmark on an NVIDIA L40S."""
     return _run_modal_benchmark(
         hardware="L40S",
@@ -456,11 +476,15 @@ def benchmark_l40s(task: str, part: str, pipeline: str, execution: str, steps: s
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
         float32_matmul_precision=float32_matmul_precision,
+        tf32_mode=tf32_mode,
+        tensorrt_optimization_level=tensorrt_optimization_level,
+        tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+        tensorrt_workspace_size_mib=tensorrt_workspace_size_mib,
     )
 
 
-@app.function(gpu="A100", timeout=1800, volumes={VOLUME_ROOT: CACHE_VOLUME})
-def benchmark_a100(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high"):
+@app.function(gpu="A100", timeout=7200, volumes={VOLUME_ROOT: CACHE_VOLUME})
+def benchmark_a100(task: str, part: str, pipeline: str, execution: str, steps: str, iterations: int, warmup: int, model_dtype_name: str, num_threads: int, num_interop_threads: int, preallocate_model_buffers: bool, model_memory_format: str, save_audio: bool, input_audio_bytes: bytes, input_audio_name: str, profile: bool = False, profile_file: str = "", checkpoint_name: str = "", ptq_int8: str = "", ptq_calib_steps: int = 32, float32_matmul_precision: str = "high", tf32_mode: str = "auto", tensorrt_optimization_level: int = 3, tensorrt_num_avg_timing_iters: int = 1, tensorrt_workspace_size_mib: int = 0):
     """Run the selected benchmark on an NVIDIA A100."""
     return _run_modal_benchmark(
         hardware="A100",
@@ -485,6 +509,10 @@ def benchmark_a100(task: str, part: str, pipeline: str, execution: str, steps: s
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
         float32_matmul_precision=float32_matmul_precision,
+        tf32_mode=tf32_mode,
+        tensorrt_optimization_level=tensorrt_optimization_level,
+        tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+        tensorrt_workspace_size_mib=tensorrt_workspace_size_mib,
     )
 
 
@@ -523,6 +551,10 @@ def _trial_to_benchmark_call(trial: dict) -> dict:
         "ptq_int8": str(trial.get("ptq_int8", "")),
         "ptq_calib_steps": int(trial.get("ptq_calib_steps", 32)),
         "float32_matmul_precision": str(trial.get("matmul_precision", "high")),
+        "tf32_mode": str(trial.get("tf32", "auto")),
+        "tensorrt_optimization_level": int(trial.get("trt_optimization_level", 3)),
+        "tensorrt_num_avg_timing_iters": int(trial.get("trt_avg_timing_iters", 1)),
+        "tensorrt_workspace_size_mib": int(trial.get("trt_workspace_size_mib", 0)),
     }
 
 
@@ -653,6 +685,10 @@ def main(
     audio_duration_s: float = 0.0,
     dtype: str = "fp32",
     matmul_precision: str = "high",
+    tf32: str = "auto",
+    trt_optimization_level: int = 3,
+    trt_avg_timing_iters: int = 1,
+    trt_workspace_size_mib: int = 0,
     ckpt: str = "",
     num_threads: int = 0,
     num_interop_threads: int = 0,
@@ -678,6 +714,7 @@ def main(
     selected_hardware = hardware.upper()
     dtype = dtype.lower()
     matmul_precision = matmul_precision.lower().replace("-", "_")
+    tf32 = tf32.lower().replace("-", "_")
     if selected_hardware not in MODAL_FUNCTIONS:
         supported = ", ".join(MODAL_FUNCTIONS)
         raise ValueError(f"Unsupported Modal hardware '{selected_hardware}'. Supported values: {supported}")
@@ -685,6 +722,14 @@ def main(
         raise ValueError("Unsupported model dtype. Use 'fp32', 'fp16', or 'bf16'.")
     if matmul_precision not in {"highest", "high", "medium"}:
         raise ValueError("Unsupported matmul precision. Use 'highest', 'high', or 'medium'.")
+    if tf32 not in {"auto", "on", "off"}:
+        raise ValueError("Unsupported TF32 mode. Use 'auto', 'on', or 'off'.")
+    if not 0 <= trt_optimization_level <= 5:
+        raise ValueError("TensorRT optimization level must be between 0 and 5.")
+    if trt_avg_timing_iters < 1:
+        raise ValueError("TensorRT average timing iterations must be at least 1.")
+    if trt_workspace_size_mib < 0:
+        raise ValueError("TensorRT workspace size must be non-negative.")
     input_audio_path = _resolve_input_audio_path(input_audio, pipeline=pipeline)
     if iterations == -1 and input_audio_path and audio_duration_s <= 0:
         audio_duration_s = _input_audio_duration_s(input_audio_path)
@@ -720,6 +765,10 @@ def main(
         ptq_int8=ptq_int8,
         ptq_calib_steps=ptq_calib_steps,
         float32_matmul_precision=matmul_precision,
+        tf32_mode=tf32,
+        tensorrt_optimization_level=trt_optimization_level,
+        tensorrt_num_avg_timing_iters=trt_avg_timing_iters,
+        tensorrt_workspace_size_mib=trt_workspace_size_mib,
     )
 
     if profile and profile_file and results:
@@ -766,6 +815,10 @@ def main(
             "audio_duration_s": audio_duration_s,
             "model_dtype": dtype,
             "matmul_precision": matmul_precision,
+            "tf32": tf32,
+            "trt_optimization_level": trt_optimization_level,
+            "trt_avg_timing_iters": trt_avg_timing_iters,
+            "trt_workspace_size_mib": trt_workspace_size_mib,
             "ckpt": ckpt,
             "num_threads": num_threads,
             "num_interop_threads": num_interop_threads,
