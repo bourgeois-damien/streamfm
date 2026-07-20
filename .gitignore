@@ -238,6 +238,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv.nosync
 env/
 venv/
 ENV/
