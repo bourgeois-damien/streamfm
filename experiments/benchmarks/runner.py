@@ -48,13 +48,6 @@ from experiments.core.paths import BenchmarkPaths
 _DEFAULT_CUDNN_ALLOW_TF32: bool | None = None
 
 
-def _float_or_default(value, default: float) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _apply_ptq_int8_if_requested(
     model,
     *,
@@ -81,39 +74,46 @@ def _apply_ptq_int8_if_requested(
             "PTQ INT8 requires --execution eager "
             "(torch.compile / cuda_graph are incompatible with quantized modules)."
         )
-    model = apply_ptq_int8_(model, components, calib_steps=ptq_calib_steps)
-    # Quantized modules expect float activations; keep benchmark tensors in fp32.
-    if model_dtype is not None and model_dtype != torch.float32:
+    fallback_dtype = model_dtype
+    if fallback_dtype not in {torch.float16, torch.float32}:
         print(
-            f"Warning: overriding benchmark model_dtype {model_dtype} → float32 after PTQ "
-            f"(quantized modules use float I/O).",
+            f"Warning: CPU INT8 PTQ supports FP32 or FP16 fallback; overriding "
+            f"{fallback_dtype} → float32.",
             flush=True,
         )
-        model_dtype = torch.float32
-    print(f"Applied PTQ INT8 components={list(components)} calib_steps={ptq_calib_steps}", flush=True)
+        fallback_dtype = torch.float32
+    model = apply_ptq_int8_(
+        model,
+        components,
+        calib_steps=ptq_calib_steps,
+        fallback_dtype=fallback_dtype,
+    )
+    model_dtype = fallback_dtype
+    print(
+        f"Applied PTQ INT8 components={list(components)} "
+        f"calib_steps={ptq_calib_steps} fallback={str(fallback_dtype).replace('torch.', '')}",
+        flush=True,
+    )
     return model, describe_ptq(model), model_dtype
+
+
+def _ptq_calibration_load_dtype(ptq_int8: str, model_dtype):
+    """Load pristine FP32 weights when CPU PTQ calibration is requested."""
+    from sgmse.util.ptq_int8 import parse_ptq_components
+    import torch
+
+    return torch.float32 if parse_ptq_components(ptq_int8) else model_dtype
 
 
 def _streaming_config_from_model_cfg(cfg):
     """Build the streaming STFT config from the model's Hydra config.
 
-    Reading n_fft/hop/alpha/beta from the checkpoint's own config keeps the
-    benchmark front-end identical to the features the model was trained on
-    (lyra uses a different hop, hence a different frame budget).
+    Shared with the evaluation driver: a quality run and a latency run must
+    frame the audio identically, or their numbers describe different pipelines.
     """
-    from experiments.streaming.pipeline import StreamingSTFTConfig
+    from experiments.streaming.stft import streaming_config_from_model_cfg
 
-    feature_cfg = cfg.model.feature_extractor
-    return StreamingSTFTConfig(
-        sample_rate=int(cfg.get("sampling_rate", 16000)),
-        n_fft=int(feature_cfg.get("n_fft", 512)),
-        hop_length=int(feature_cfg.get("hop_length", 256)),
-        alpha=float(feature_cfg.get("alpha", 0.5)),
-        beta=float(feature_cfg.get("beta", 1.0)),
-        cut_highest_freqs=int(feature_cfg.get("cut_highest_freqs", 1)),
-        sigma_y=_float_or_default(cfg.model.get("sigma_y", 0.25), 0.25),
-        normalized_stft=bool(feature_cfg.get("normalized_stft", True)),
-    )
+    return streaming_config_from_model_cfg(cfg)
 
 
 def _frame_budget_ms_from_config(config) -> float:
@@ -142,6 +142,57 @@ def _load_input_audio(input_audio_path: str, *, config, device):
     return audio
 
 
+def _resolve_streaming_pipeline(
+    *,
+    internal_pipeline: str,
+    use_tensorrt: bool,
+    tensorrt_cuda_graph: bool,
+    use_compiled: bool,
+    model_dtype,
+    model_memory_format: str,
+    preallocate_model_buffers: bool,
+):
+    """Pick the streaming pipeline for an execution mode and bind its options.
+
+    Quality mode reuses the very pipelines the latency benchmark times, so the
+    layers that run INT8 (and those that fall back) are the same ones the
+    reported speed describes.  Returns (callable, kwargs, name); the caller adds
+    the per-file arguments.
+    """
+    from experiments.streaming.pipeline import (
+        run_streaming_audio_pipeline,
+        run_streaming_audio_pipeline_with_cuda_graph_model,
+        run_streaming_audio_pipeline_with_full_cuda_graph,
+        run_streaming_audio_pipeline_with_tensorrt_cuda_graph,
+    )
+
+    shared = {"model_dtype": model_dtype, "model_memory_format": model_memory_format}
+    if use_tensorrt and tensorrt_cuda_graph:
+        # This variant drives the engine itself and takes no use_compiled.
+        return run_streaming_audio_pipeline_with_tensorrt_cuda_graph, shared, "tensorrt_cuda_graph"
+    if internal_pipeline == "audio_full_graph":
+        return (
+            run_streaming_audio_pipeline_with_full_cuda_graph,
+            {**shared, "use_compiled": use_compiled},
+            "audio_full_graph",
+        )
+    if internal_pipeline == "audio_graph_model":
+        return (
+            run_streaming_audio_pipeline_with_cuda_graph_model,
+            {**shared, "use_compiled": use_compiled},
+            "audio_graph_model",
+        )
+    return (
+        run_streaming_audio_pipeline,
+        {
+            **shared,
+            "use_compiled": use_compiled,
+            "preallocate_model_buffers": preallocate_model_buffers,
+        },
+        "audio",
+    )
+
+
 def _benchmark_flow_task(
     *,
     task: str,
@@ -167,6 +218,9 @@ def _benchmark_flow_task(
     tensorrt_optimization_level: int = 3,
     tensorrt_num_avg_timing_iters: int = 1,
     tensorrt_workspace_size_bytes: int = 0,
+    tensorrt_engine_cache: str = "off",
+    tensorrt_engine_cache_dir: str = "",
+    quality=None,
 ) -> tuple[list[dict], float, float]:
     """Load and benchmark a flow-only task (stftpr/bwe/derev/lyra).
 
@@ -185,7 +239,8 @@ def _benchmark_flow_task(
         import torch
 
         model_dtype = torch.float32
-    model, cfg = load_flow_model(device, model_dtype, paths, task=task, checkpoint_name=checkpoint_name or None)
+    load_dtype = _ptq_calibration_load_dtype("" if use_tensorrt else ptq_int8, model_dtype)
+    model, cfg = load_flow_model(device, load_dtype, paths, task=task, checkpoint_name=checkpoint_name or None)
     model, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
         model,
         # TensorRT INT8 uses ModelOpt Q/DQ below; do not apply the separate
@@ -213,6 +268,8 @@ def _benchmark_flow_task(
             optimization_level=tensorrt_optimization_level,
             num_avg_timing_iters=tensorrt_num_avg_timing_iters,
             workspace_size_bytes=tensorrt_workspace_size_bytes,
+            engine_cache=tensorrt_engine_cache,
+            engine_cache_dir=tensorrt_engine_cache_dir or None,
         )
         trt_validation = model.validation
         trt_runtime_profile = model.runtime_profile
@@ -231,7 +288,76 @@ def _benchmark_flow_task(
     #    graph_model      -> random frames, CUDA Graph replay
     #    audio            -> real STFT pipeline over real/synthetic audio
     #    audio_graph_model-> same pipeline with the solver as one CUDA Graph
-    if use_tensorrt and tensorrt_cuda_graph and internal_pipeline == "model":
+    #    audio_full_graph -> STFT + solver + ISTFT captured as one CUDA Graph
+    #
+    # Quality mode short-circuits all of these: it runs the same streaming
+    # pipeline, but over a test-set split instead of one buffer, and writes
+    # audio plus a scorer manifest rather than timing statistics.  It sits after
+    # the model/engine construction above so one TensorRT build and one graph
+    # capture serve every file in the split.
+    if quality is not None:
+        from experiments.benchmarks.quality import run_streaming_quality_sweep
+
+        if internal_pipeline not in {"audio", "audio_graph_model", "audio_full_graph"}:
+            raise ValueError(
+                "Quality runs reconstruct waveforms; use '--pipeline audio'."
+            )
+        pipeline_fn, pipeline_kwargs, pipeline_name = _resolve_streaming_pipeline(
+            internal_pipeline=internal_pipeline,
+            use_tensorrt=use_tensorrt,
+            tensorrt_cuda_graph=tensorrt_cuda_graph,
+            use_compiled=use_compiled,
+            model_dtype=model_dtype,
+            model_memory_format=model_memory_format,
+            preallocate_model_buffers=preallocate_model_buffers,
+        )
+        # The history row gets this too, but the manifest is what stays next to
+        # the WAVs on the volume: a score read months later must be able to say
+        # which engine produced it and which layers actually ran quantized,
+        # without depending on a separate history file still being around.
+        quality_manifest = {
+            "task": task,
+            "execution_pipeline": pipeline_name,
+            "model_dtype": str(model_dtype).replace("torch.", ""),
+            "model_memory_format": model_memory_format,
+            "device": device_label(device),
+        }
+        if trt_validation is not None:
+            quality_manifest["tensorrt"] = {
+                **trt_validation,
+                "compilation_profile": getattr(model, "compilation_profile", {}),
+            }
+            if tensorrt_precision == "int8":
+                quality_manifest["ptq_int8"] = "tensorrt"
+                quality_manifest["ptq_calib_steps"] = ptq_calib_steps
+                quality_manifest["ptq_fallback_dtype"] = str(
+                    int8_fallback_dtype
+                ).replace("torch.", "")
+        if _ptq_meta is not None:
+            quality_manifest["ptq_int8"] = ",".join(_ptq_meta.get("components", []))
+            quality_manifest["ptq_engine"] = _ptq_meta.get("engine", "")
+            quality_manifest["ptq_calib_steps"] = _ptq_meta.get(
+                "calib_steps", ptq_calib_steps
+            )
+            quality_manifest["ptq_fallback_dtype"] = _ptq_meta.get(
+                "fallback_dtype", "float32"
+            )
+
+        results = run_streaming_quality_sweep(
+            pipeline_fn=pipeline_fn,
+            pipeline_kwargs=pipeline_kwargs,
+            model=model,
+            cfg=cfg,
+            config=config,
+            device=device,
+            steps_list=steps_list,
+            options=quality,
+            extra_manifest=quality_manifest,
+        )
+        for row in results:
+            row["pipeline"] = pipeline_name
+            row["device"] = device.type
+    elif use_tensorrt and tensorrt_cuda_graph and internal_pipeline == "model":
         from experiments.benchmarks.tensorrt.streaming import (
             benchmark_tensorrt_flow_steps_cuda_graph,
         )
@@ -359,6 +485,40 @@ def _benchmark_flow_task(
             if input_audio_path:
                 summary["input_audio_path"] = input_audio_path
             results.append(summary)
+    elif internal_pipeline == "audio_full_graph":
+        from experiments.streaming.pipeline import (
+            make_synthetic_audio,
+            run_streaming_audio_pipeline_with_full_cuda_graph,
+        )
+
+        audio = _load_input_audio(input_audio_path, config=config, device=device)
+        if audio is None:
+            audio = make_synthetic_audio(
+                num_samples=(warmup + iterations) * config.hop_length,
+                sample_rate=config.sample_rate,
+                device=device,
+            )
+        results = []
+        for step_count in steps_list:
+            summary = run_streaming_audio_pipeline_with_full_cuda_graph(
+                model,
+                audio,
+                device=device,
+                steps=step_count,
+                iterations=iterations,
+                warmup=warmup,
+                use_compiled=use_compiled,
+                config=config,
+                model_dtype=model_dtype,
+                model_memory_format=model_memory_format,
+                return_audio=save_audio,
+            )
+            summary["task"] = task
+            summary["pipeline"] = "audio_full_graph"
+            summary["device"] = device.type
+            if input_audio_path:
+                summary["input_audio_path"] = input_audio_path
+            results.append(summary)
     else:
         raise ValueError("Unsupported flow-task pipeline.")
 
@@ -380,10 +540,12 @@ def _benchmark_flow_task(
             if tensorrt_precision == "int8":
                 row["ptq_int8"] = "tensorrt"
                 row["ptq_calib_steps"] = ptq_calib_steps
+                row["ptq_fallback_dtype"] = str(int8_fallback_dtype).replace("torch.", "")
         if _ptq_meta is not None:
             row["ptq_int8"] = ",".join(_ptq_meta.get("components", []))
             row["ptq_engine"] = _ptq_meta.get("engine", "")
             row["ptq_calib_steps"] = _ptq_meta.get("calib_steps", ptq_calib_steps)
+            row["ptq_fallback_dtype"] = _ptq_meta.get("fallback_dtype", "float32")
 
     return results, load_s, time.perf_counter() - bench_started_at
 
@@ -406,7 +568,8 @@ def _benchmark_se_predictor_task(
 ) -> tuple[list[dict], float, float]:
     """Load the SE predictor and time it alone: one DNN call per frame, no flow."""
     load_started_at = time.perf_counter()
-    predictor, _ = load_se_predictor(device, dtype=model_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
+    load_dtype = _ptq_calibration_load_dtype(ptq_int8, model_dtype)
+    predictor, _ = load_se_predictor(device, dtype=load_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
     predictor, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
         predictor,
         ptq_int8=ptq_int8,
@@ -447,6 +610,7 @@ def _benchmark_se_predictor_task(
             row["ptq_int8"] = ",".join(_ptq_meta.get("components", []))
             row["ptq_engine"] = _ptq_meta.get("engine", "")
             row["ptq_calib_steps"] = _ptq_meta.get("calib_steps", ptq_calib_steps)
+            row["ptq_fallback_dtype"] = _ptq_meta.get("fallback_dtype", "float32")
 
     return results, load_s, time.perf_counter() - bench_started_at
 
@@ -471,7 +635,8 @@ def _benchmark_se_flow_task(
 ) -> tuple[list[dict], float, float]:
     """Load the SE flow backbone and time the Euler solver without the predictor."""
     load_started_at = time.perf_counter()
-    flow, flow_cfg = load_se_flow(device, dtype=model_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
+    load_dtype = _ptq_calibration_load_dtype(ptq_int8, model_dtype)
+    flow, flow_cfg = load_se_flow(device, dtype=load_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
     flow, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
         flow,
         ptq_int8=ptq_int8,
@@ -520,6 +685,7 @@ def _benchmark_se_flow_task(
             row["ptq_int8"] = ",".join(_ptq_meta.get("components", []))
             row["ptq_engine"] = _ptq_meta.get("engine", "")
             row["ptq_calib_steps"] = _ptq_meta.get("calib_steps", ptq_calib_steps)
+            row["ptq_fallback_dtype"] = _ptq_meta.get("fallback_dtype", "float32")
 
     return results, load_s, time.perf_counter() - bench_started_at
 
@@ -544,7 +710,8 @@ def _benchmark_se_full_task(
 ) -> tuple[list[dict], float, float]:
     """Load and benchmark the full SE chain: predictor + flow, 1 + steps DNN calls per frame."""
     load_started_at = time.perf_counter()
-    se_model = load_se_full(device, dtype=model_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
+    load_dtype = _ptq_calibration_load_dtype(ptq_int8, model_dtype)
+    se_model = load_se_full(device, dtype=load_dtype, paths=paths, checkpoint_name=checkpoint_name or None)
     # PTQ must cover both DNNs: quantizing only one would leave an
     # int8/fp32 boundary in the middle of the per-frame chain.
     se_model["predictor"], _ptq_meta_pred, model_dtype = _apply_ptq_int8_if_requested(
@@ -677,6 +844,7 @@ def _benchmark_se_full_task(
             row["ptq_int8"] = ",".join(_ptq_meta.get("components", []))
             row["ptq_engine"] = _ptq_meta.get("engine", "")
             row["ptq_calib_steps"] = _ptq_meta.get("calib_steps", ptq_calib_steps)
+            row["ptq_fallback_dtype"] = _ptq_meta.get("fallback_dtype", "float32")
 
     return results, load_s, time.perf_counter() - bench_started_at
 
@@ -706,6 +874,9 @@ def run_internal_benchmark(
     tensorrt_optimization_level: int = 3,
     tensorrt_num_avg_timing_iters: int = 1,
     tensorrt_workspace_size_bytes: int = 0,
+    tensorrt_engine_cache: str = "off",
+    tensorrt_engine_cache_dir: str = "",
+    quality=None,
 ) -> tuple[list[dict], float, float]:
     """Dispatch a benchmark run by task family: flow backbones vs the three SE variants.
 
@@ -718,6 +889,12 @@ def run_internal_benchmark(
     if use_tensorrt and internal_task not in {"stftpr", "bwe", "derev", "lyra"}:
         raise ValueError(
             "execution=tensorrt is currently integrated for the causal flow backbones only, "
+            "not the SE predictor/full pipeline."
+        )
+
+    if quality is not None and internal_task not in {"stftpr", "bwe", "derev", "lyra"}:
+        raise ValueError(
+            "Quality runs are implemented for the causal flow backbones only, "
             "not the SE predictor/full pipeline."
         )
 
@@ -746,6 +923,9 @@ def run_internal_benchmark(
             tensorrt_optimization_level=tensorrt_optimization_level,
             tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
             tensorrt_workspace_size_bytes=tensorrt_workspace_size_bytes,
+            tensorrt_engine_cache=tensorrt_engine_cache,
+            tensorrt_engine_cache_dir=tensorrt_engine_cache_dir,
+            quality=quality,
         )
     if internal_task == "se_predictor":
         return _benchmark_se_predictor_task(
@@ -831,9 +1011,14 @@ def run_benchmark(
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
     tf32_mode: str = "auto",
+    cudnn_benchmark: bool = False,
+    cudnn_benchmark_limit: int = 10,
     tensorrt_optimization_level: int = 3,
     tensorrt_num_avg_timing_iters: int = 1,
     tensorrt_workspace_size_mib: int = 0,
+    tensorrt_engine_cache: str = "off",
+    tensorrt_engine_cache_dir: str = "",
+    quality=None,
 ) -> list[dict]:
     """Run one benchmark end to end; the single entry point shared by local CLI and Modal.
 
@@ -855,6 +1040,17 @@ def run_benchmark(
     if execution in {"cuda_graph", "tensorrt", "tensorrt_cuda_graph"} and device.type != "cuda":
         raise ValueError(f"execution={execution} requires a CUDA device.")
     is_tensorrt = execution in {"tensorrt", "tensorrt_cuda_graph"}
+    if cudnn_benchmark and device.type != "cuda":
+        raise ValueError("--cudnn-benchmark requires a CUDA device.")
+    if cudnn_benchmark and is_tensorrt:
+        raise ValueError(
+            "--cudnn-benchmark tunes PyTorch cuDNN convolutions and does not apply "
+            "to TensorRT engines."
+        )
+    if cudnn_benchmark_limit < 0:
+        raise ValueError("--cudnn-benchmark-limit must be non-negative (0 means exhaustive).")
+    if not cudnn_benchmark and cudnn_benchmark_limit != 10:
+        raise ValueError("--cudnn-benchmark-limit only applies with --cudnn-benchmark.")
     trt_int8 = is_tensorrt and ptq_int8.strip().lower() == "tensorrt"
     if is_tensorrt and not trt_int8 and model_dtype_name.lower() not in {"fp16", "fp32"}:
         raise ValueError("TensorRT requires --dtype fp16 or --dtype fp32.")
@@ -870,6 +1066,11 @@ def run_benchmark(
     if tensorrt_workspace_size_mib < 0:
         raise ValueError("TensorRT workspace size must be non-negative.")
     tensorrt_workspace_size_bytes = tensorrt_workspace_size_mib * 1024 * 1024
+    # Reject an unusable engine-cache request up front rather than after the
+    # model has been loaded and calibrated.
+    from experiments.benchmarks.tensorrt.engine_cache import EngineCache
+
+    EngineCache(tensorrt_engine_cache, tensorrt_engine_cache_dir or None)
 
     # 2) Process-level setup. chdir to the repo root because checkpoint/config
     # loading uses relative paths; matmul precision trades fp32 accuracy for
@@ -879,6 +1080,11 @@ def run_benchmark(
     torch.set_float32_matmul_precision(float32_matmul_precision)
     global _DEFAULT_CUDNN_ALLOW_TF32
     if device.type == "cuda":
+        # This must be set before the first fixed-shape convolution. cuDNN then
+        # benchmarks eligible execution plans on first use; benchmark warm-up
+        # absorbs that one-time search before measured frames and graph capture.
+        torch.backends.cudnn.benchmark = bool(cudnn_benchmark)
+        torch.backends.cudnn.benchmark_limit = int(cudnn_benchmark_limit)
         if _DEFAULT_CUDNN_ALLOW_TF32 is None:
             _DEFAULT_CUDNN_ALLOW_TF32 = bool(torch.backends.cudnn.allow_tf32)
         torch.backends.cudnn.allow_tf32 = (
@@ -909,10 +1115,14 @@ def run_benchmark(
         pipeline=pipeline,
         execution=execution,
     )
-    if save_audio and resolved["internal_pipeline"] not in {"audio", "audio_graph_model"}:
+    if save_audio and resolved["internal_pipeline"] not in {"audio", "audio_graph_model", "audio_full_graph"}:
         raise ValueError("--save-audio requires --pipeline audio.")
-    if input_audio_path and resolved["internal_pipeline"] not in {"audio", "audio_graph_model"}:
+    if input_audio_path and resolved["internal_pipeline"] not in {"audio", "audio_graph_model", "audio_full_graph"}:
         raise ValueError("--input-audio requires --pipeline audio.")
+    if quality is not None and input_audio_path:
+        raise ValueError(
+            "--quality-split reads its audio from the dataset split; drop --input-audio."
+        )
 
     # Closure so the exact same call can run bare or wrapped in the profiler
     # below without duplicating this argument list.
@@ -945,6 +1155,9 @@ def run_benchmark(
             tensorrt_optimization_level=tensorrt_optimization_level,
             tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
             tensorrt_workspace_size_bytes=tensorrt_workspace_size_bytes,
+            tensorrt_engine_cache=tensorrt_engine_cache,
+            tensorrt_engine_cache_dir=tensorrt_engine_cache_dir,
+            quality=quality,
         )
 
     # 3) Run the timing loops, optionally under the PyTorch profiler. The
@@ -997,6 +1210,13 @@ def run_benchmark(
         row["float32_matmul_precision"] = float32_matmul_precision
         row["tf32_mode"] = tf32_mode
         row["cudnn_allow_tf32"] = effective_cudnn_tf32
+        row["cudnn_benchmark"] = bool(cudnn_benchmark) if device.type == "cuda" else None
+        row["cudnn_benchmark_limit"] = (
+            int(cudnn_benchmark_limit) if device.type == "cuda" and cudnn_benchmark else None
+        )
+        row["inductor_compile_mode"] = (
+            "max-autotune-no-cudagraphs" if resolved["use_compiled"] else None
+        )
         row["tensorrt_optimization_level"] = tensorrt_optimization_level if is_tensorrt else None
         row["tensorrt_num_avg_timing_iters"] = tensorrt_num_avg_timing_iters if is_tensorrt else None
         row["tensorrt_workspace_size_mib"] = tensorrt_workspace_size_mib if is_tensorrt else None
