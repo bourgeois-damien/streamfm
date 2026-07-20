@@ -1,0 +1,45 @@
+# One conservative INT8 composition per compressed rank: dynamic INT8 Linear,
+# eager FP32 fallback, channels_last and preallocated model buffers.
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+method: grid
+parameters:
+  backend:
+    value: local
+  hardware:
+    value: cpu
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  steps:
+    value: 1
+  execution:
+    value: eager
+  dtype:
+    value: fp32
+  memory_format:
+    value: channels_last
+  preallocate_model_buffers:
+    value: true
+  ptq_int8:
+    value: linear
+  ptq_calib_steps:
+    value: 16
+  ckpt:
+    values:
+      - compressed/streamfm_stftpr_k5.ckpt
+      - compressed/streamfm_stftpr_k6.ckpt
+      - compressed/streamfm_stftpr_k7.ckpt
+      - compressed/streamfm_stftpr_k8.ckpt
+  iterations:
+    value: 100
+  warmup:
+    value: 20
+  num_threads:
+    value: 1
+  num_interop_threads:
+    value: 1

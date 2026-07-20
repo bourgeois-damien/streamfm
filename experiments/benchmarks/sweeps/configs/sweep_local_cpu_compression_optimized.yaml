@@ -1,0 +1,52 @@
+# Local Apple/ARM CPU compression matrix requested for K=5..8.
+#
+# FP32: eager/compiled × contiguous/channels_last × preallocation off/on.
+# FP16: compiled only × contiguous/channels_last × preallocation off/on.
+#
+# Run without network logging:
+#   WANDB_MODE=disabled .venv/bin/python \
+#     experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_local_cpu_compression_optimized.yaml \
+#     --history-json outputs/cpu_compression_optimized_20260718.json
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+method: grid
+parameters:
+  backend:
+    value: local
+  hardware:
+    value: cpu
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  steps:
+    value: 1
+  execution:
+    values: [eager, compiled]
+  dtype:
+    values: [fp32, fp16]
+  memory_format:
+    values: [contiguous, channels_last]
+  preallocate_model_buffers:
+    values: [false, true]
+  ckpt:
+    values:
+      - compressed/streamfm_stftpr_k5.ckpt
+      - compressed/streamfm_stftpr_k6.ckpt
+      - compressed/streamfm_stftpr_k7.ckpt
+      - compressed/streamfm_stftpr_k8.ckpt
+  iterations:
+    value: 100
+  warmup:
+    value: 20
+  num_threads:
+    value: 1
+  num_interop_threads:
+    value: 1
+exclude:
+  - dtype: fp16
+    execution: eager
