@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from experiments.benchmarks.tensorrt.engine_cache import DEFAULT_CACHE_DIR_ENV as ENGINE_CACHE_DIR_ENV
 from experiments.core.paths import make_benchmark_paths
 from experiments.core.repo import find_repo_root
 from experiments.core.devices import select_torch_device
@@ -123,8 +124,35 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-path", default="", help="Override the selected split path/csv from the config.")
     parser.add_argument("--data-format", default="", help="Override cfg.model.data_module.format.")
     parser.add_argument("--part", default="model", choices=("model", "predictor"))
-    parser.add_argument("--pipeline", default="offline", choices=("offline",))
-    parser.add_argument("--execution", default="eager", help="Execution: eager, compiled, or cuda_graph.")
+    parser.add_argument(
+        "--pipeline",
+        default="offline",
+        choices=("offline", "streaming"),
+        help="offline scores model.enhance(); streaming scores the frame-causal path.",
+    )
+    parser.add_argument(
+        "--execution",
+        default="eager",
+        help="Execution: eager, compiled, cuda_graph, or tensorrt (streaming only).",
+    )
+    parser.add_argument("--trt-precision", default="fp16", choices=("fp32", "fp16", "int8"))
+    parser.add_argument("--trt-calib-steps", type=int, default=32, help="INT8 calibration steps.")
+    parser.add_argument(
+        "--trt-tf32",
+        default="auto",
+        choices=("auto", "on", "off"),
+        help="TF32 policy for the engine build. 'auto' leaves it untouched.",
+    )
+    parser.add_argument("--trt-optimization-level", type=int, default=3)
+    parser.add_argument("--trt-num-avg-timing-iters", type=int, default=1)
+    parser.add_argument("--trt-workspace-size-bytes", type=int, default=0)
+    parser.add_argument(
+        "--trt-engine-cache",
+        default="off",
+        choices=("off", "read", "write", "readwrite"),
+        help="Reuse a serialized engine so quality and latency describe the same build.",
+    )
+    parser.add_argument("--trt-engine-cache-dir", default="", help=f"Defaults to ${ENGINE_CACHE_DIR_ENV}.")
     parser.add_argument("--solver", default="euler", help="ODE solver, or compact official form like 5xeuler.")
     parser.add_argument("--steps", type=int, default=5)
     parser.add_argument("--limit", type=int, default=0, help="0 means all files after offset.")
@@ -230,6 +258,14 @@ def _run_local(args: argparse.Namespace, hardware: str) -> tuple[dict, str, str]
         num_threads=args.num_threads,
         num_interop_threads=args.num_interop_threads,
         config_overrides=args.config_override,
+        tensorrt_precision=args.trt_precision,
+        tensorrt_calibration_steps=args.trt_calib_steps,
+        tensorrt_allow_tf32=(None if args.trt_tf32 == "auto" else args.trt_tf32 == "on"),
+        tensorrt_optimization_level=args.trt_optimization_level,
+        tensorrt_num_avg_timing_iters=args.trt_num_avg_timing_iters,
+        tensorrt_workspace_size_bytes=args.trt_workspace_size_bytes,
+        tensorrt_engine_cache=args.trt_engine_cache,
+        tensorrt_engine_cache_dir=args.trt_engine_cache_dir,
     )
     record_eval_result(result=result, command=_command_dict(args, backend="local", hardware=hardware), history_json=args.history_json)
     if not args.no_local_log:
@@ -267,6 +303,14 @@ def _command_dict(args: argparse.Namespace, *, backend: str, hardware: str) -> d
         "part": args.part,
         "pipeline": args.pipeline,
         "execution": args.execution,
+        "trt_precision": args.trt_precision,
+        "trt_calib_steps": args.trt_calib_steps,
+        "trt_tf32": args.trt_tf32,
+        "trt_optimization_level": args.trt_optimization_level,
+        "trt_num_avg_timing_iters": args.trt_num_avg_timing_iters,
+        "trt_workspace_size_bytes": args.trt_workspace_size_bytes,
+        "trt_engine_cache": args.trt_engine_cache,
+        "trt_engine_cache_dir": args.trt_engine_cache_dir,
         "solver": args.solver,
         "steps": args.steps,
         "limit": args.limit,
@@ -351,6 +395,20 @@ def _run_modal(args: argparse.Namespace, hardware: str) -> tuple[dict, str, str]
         args.crop_mode,
         "--memory-format",
         args.memory_format,
+        "--trt-precision",
+        args.trt_precision,
+        "--trt-calib-steps",
+        str(args.trt_calib_steps),
+        "--trt-tf32",
+        args.trt_tf32,
+        "--trt-optimization-level",
+        str(args.trt_optimization_level),
+        "--trt-num-avg-timing-iters",
+        str(args.trt_num_avg_timing_iters),
+        "--trt-workspace-size-bytes",
+        str(args.trt_workspace_size_bytes),
+        "--trt-engine-cache",
+        args.trt_engine_cache,
     ]
     optional_pairs = {
         "--config-name": args.config_name,

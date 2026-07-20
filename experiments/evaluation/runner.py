@@ -22,6 +22,7 @@ from experiments.core.paths import BenchmarkPaths, checkpoint_path
 from experiments.core.tensors import apply_model_memory_format, normalize_model_memory_format
 from experiments.core.devices import device_label, normalize_float32_matmul_precision
 from experiments.core.repo import ensure_repo_importable
+from experiments.benchmarks.tensorrt.engine_cache import normalize_cache_mode
 from experiments.evaluation.options import (
     normalize_part,
     normalize_pipeline,
@@ -111,6 +112,90 @@ def _apply_execution(model, execution: str):
             model.wrapped_model.dnn = torch.compile(model.wrapped_model.dnn)
         return model
     raise ValueError(f"Unsupported execution: {execution}")
+
+
+def _streaming_backbone(model):
+    """Find the causal DNN backbone inside an instantiated evaluation model.
+
+    Deliberately taken from the model this run already loaded rather than
+    re-loaded from the DNN-only export: the streaming numbers must describe the
+    same weights as the offline numbers they will be compared against.
+    """
+    for holder in (model, getattr(model, "wrapped_model", None)):
+        backbone = getattr(holder, "dnn", None)
+        if backbone is not None:
+            return backbone
+    raise ValueError("Model exposes no 'dnn' backbone; --pipeline streaming needs one.")
+
+
+def _prepare_streaming_flow(
+    *,
+    model,
+    execution: str,
+    model_dtype,
+    model_memory_format: str,
+    tensorrt_precision: str,
+    tensorrt_calibration_steps: int,
+    tensorrt_allow_tf32: bool | None,
+    tensorrt_optimization_level: int,
+    tensorrt_num_avg_timing_iters: int,
+    tensorrt_workspace_size_bytes: int,
+    tensorrt_engine_cache: str,
+    tensorrt_engine_cache_dir: str,
+):
+    """Return (flow, use_engine, model_dtype, info) for the streaming pipeline.
+
+    Streaming does not use autocast: the deployed engine has one fixed I/O
+    dtype, so the backbone is cast the way the benchmark casts it, and the
+    quality number then describes the precision that actually ships.
+    """
+    import torch
+
+    from experiments.core.tensors import apply_model_memory_format
+
+    flow = _streaming_backbone(model)
+    info: dict = {"tensorrt_precision": "", "tensorrt_engine_cache": "off"}
+
+    if execution != "tensorrt":
+        flow = apply_model_memory_format(flow.to(dtype=model_dtype), model_memory_format)
+        return flow, False, model_dtype, info
+
+    # Same convention as the latency benchmark: ModelOpt calibrates in FP32 and
+    # the engine keeps FP32 I/O, so for INT8 the requested dtype selects the
+    # floating-point fallback TensorRT may use internally, not the I/O dtype.
+    int8_fallback_dtype = model_dtype
+    if tensorrt_precision == "int8":
+        model_dtype = torch.float32
+
+    from experiments.benchmarks.tensorrt.streaming import build_tensorrt_streaming_adapter
+
+    flow = apply_model_memory_format(flow.to(dtype=model_dtype), model_memory_format)
+    adapter = build_tensorrt_streaming_adapter(
+        flow,
+        dtype=model_dtype,
+        precision=tensorrt_precision,
+        calibration_steps=tensorrt_calibration_steps,
+        use_cuda_graph=False,
+        memory_format=model_memory_format,
+        int8_fallback_dtype=int8_fallback_dtype,
+        allow_tf32=tensorrt_allow_tf32,
+        optimization_level=tensorrt_optimization_level,
+        num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+        workspace_size_bytes=tensorrt_workspace_size_bytes,
+        engine_cache=tensorrt_engine_cache,
+        engine_cache_dir=tensorrt_engine_cache_dir or None,
+    )
+    info = {
+        "tensorrt_precision": tensorrt_precision,
+        "tensorrt_engine_cache": tensorrt_engine_cache,
+        "tensorrt_int8_fallback_dtype": str(int8_fallback_dtype).replace("torch.", ""),
+        "tensorrt_validation": getattr(adapter, "validation", None),
+        # The precision partition is the whole point of scoring INT8: record
+        # which layers ran quantized so the metric can be read as evidence
+        # about this exact engine rather than about "INT8" in the abstract.
+        "tensorrt_compilation_profile": getattr(adapter, "compilation_profile", None),
+    }
+    return adapter, True, model_dtype, info
 
 
 def _enhance_one(
@@ -215,6 +300,14 @@ def run_test_set_inference(
     cache_info: dict | None = None,
     config_overrides: list[str] | tuple[str, ...] = (),
     float32_matmul_precision: str = "high",
+    tensorrt_precision: str = "fp16",
+    tensorrt_calibration_steps: int = 32,
+    tensorrt_allow_tf32: bool | None = None,
+    tensorrt_optimization_level: int = 3,
+    tensorrt_num_avg_timing_iters: int = 1,
+    tensorrt_workspace_size_bytes: int = 0,
+    tensorrt_engine_cache: str = "off",
+    tensorrt_engine_cache_dir: str = "",
 ) -> dict:
     """Run official offline inference on a configured dataset split."""
     import torch
@@ -228,7 +321,23 @@ def run_test_set_inference(
     split = normalize_split(split)
     part = normalize_part(part)
     pipeline = normalize_pipeline(pipeline)
+    if pipeline == "streaming" and execution.lower().strip() == "auto":
+        # 'auto' resolves to cuda_graph on CUDA, but graph capture is a latency
+        # concern; the quality driver runs one file frame by frame.
+        execution = "eager"
     execution = resolve_execution(execution, device)
+    if pipeline == "streaming":
+        if execution not in {"eager", "compiled", "tensorrt"}:
+            raise ValueError(
+                "Streaming evaluation supports --execution eager, compiled or tensorrt."
+            )
+    elif execution == "tensorrt":
+        raise ValueError("--execution tensorrt requires --pipeline streaming.")
+    if execution == "tensorrt":
+        tensorrt_precision = tensorrt_precision.lower().strip()
+        if tensorrt_precision not in {"fp32", "fp16", "int8"}:
+            raise ValueError("--trt-precision must be 'fp32', 'fp16' or 'int8'.")
+        tensorrt_engine_cache = normalize_cache_mode(tensorrt_engine_cache)
     config_name, ckpt = resolve_config_and_checkpoint(
         task=task,
         config_name=config_name,
@@ -281,9 +390,43 @@ def run_test_set_inference(
     # BFloat16" / "polar_cuda not implemented for 'Half'"). Autocast keeps those
     # ops in fp32 while running the DNN backbone (matmul/conv) in reduced precision,
     # which is the meaningful precision comparison here.
-    use_autocast = model_dtype != torch.float32
+    # Streaming runs the backbone at a fixed dtype instead (see
+    # _prepare_streaming_flow): a TensorRT engine has one I/O dtype and no
+    # autocast, so autocasting here would score a pipeline nobody deploys.
+    use_autocast = model_dtype != torch.float32 and pipeline == "offline"
     model = apply_model_memory_format(model, model_memory_format)
-    model = _apply_execution(model, execution)
+    if pipeline == "offline":
+        model = _apply_execution(model, execution)
+
+    streaming_info: dict = {}
+    streaming_flow = None
+    streaming_use_engine = False
+    streaming_config = None
+    if pipeline == "streaming":
+        from experiments.streaming.enhance import streaming_algorithmic_delay, streaming_enhance
+        from experiments.streaming.stft import streaming_config_from_model_cfg
+
+        if solver != "euler":
+            raise ValueError(
+                f"Streaming evaluation implements the Euler solver only, got '{solver}'."
+            )
+        if part != "model":
+            raise ValueError("--part predictor has no streaming evaluation path.")
+        streaming_config = streaming_config_from_model_cfg(cfg)
+        streaming_flow, streaming_use_engine, model_dtype, streaming_info = _prepare_streaming_flow(
+            model=model,
+            execution=execution,
+            model_dtype=model_dtype,
+            model_memory_format=model_memory_format,
+            tensorrt_precision=tensorrt_precision,
+            tensorrt_calibration_steps=tensorrt_calibration_steps,
+            tensorrt_allow_tf32=tensorrt_allow_tf32,
+            tensorrt_optimization_level=tensorrt_optimization_level,
+            tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
+            tensorrt_workspace_size_bytes=tensorrt_workspace_size_bytes,
+            tensorrt_engine_cache=tensorrt_engine_cache,
+            tensorrt_engine_cache_dir=tensorrt_engine_cache_dir,
+        )
 
     if not hasattr(model, "data_module") or model.data_module is None:
         raise ValueError("Model has no data_module; cannot run split-based evaluation.")
@@ -347,16 +490,30 @@ def run_test_set_inference(
                     else contextlib.nullcontext()
                 )
                 with autocast_ctx:
-                    x_hat = _enhance_one(
-                        model=model,
-                        y=y_model,
-                        sr=sr,
-                        part=part,
-                        task=task,
-                        solver=solver,
-                        steps=steps,
-                        seed=file_seed,
-                    )
+                    if pipeline == "streaming":
+                        x_hat = streaming_enhance(
+                            streaming_flow,
+                            y_model,
+                            device=device,
+                            steps=steps,
+                            config=streaming_config,
+                            seed=file_seed,
+                            model_dtype=model_dtype,
+                            model_memory_format=model_memory_format,
+                            use_compiled=execution == "compiled",
+                            use_engine=streaming_use_engine,
+                        )
+                    else:
+                        x_hat = _enhance_one(
+                            model=model,
+                            y=y_model,
+                            sr=sr,
+                            part=part,
+                            task=task,
+                            solver=solver,
+                            steps=steps,
+                            seed=file_seed,
+                        )
                 if x_hat.ndim == 1:
                     x_hat = x_hat.unsqueeze(0)
                 x_hat = x_hat.detach().cpu().float()
@@ -431,6 +588,13 @@ def run_test_set_inference(
         "files": files,
         "errors": errors,
     }
+    if pipeline == "streaming":
+        manifest["streaming"] = {
+            "algorithmic_delay_samples": streaming_algorithmic_delay(streaming_config),
+            "n_fft": streaming_config.n_fft,
+            "hop_length": streaming_config.hop_length,
+            **streaming_info,
+        }
     manifest_path = run_dir / "manifest.json"
     summary_path = run_dir / "summary.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -472,6 +636,13 @@ def run_test_set_inference(
         "config_path": str(config_path),
         "torch_version": torch.__version__,
     }
+    if pipeline == "streaming":
+        result.update(
+            {
+                "streaming_algorithmic_delay_samples": streaming_algorithmic_delay(streaming_config),
+                **streaming_info,
+            }
+        )
     if device.type == "cpu":
         result["num_threads"] = torch.get_num_threads()
         result["num_interop_threads"] = torch.get_num_interop_threads()

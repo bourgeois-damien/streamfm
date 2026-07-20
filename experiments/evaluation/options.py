@@ -71,10 +71,17 @@ def normalize_split(split: str) -> str:
 
 
 def normalize_pipeline(pipeline: str) -> str:
-    """Normalize and validate evaluation pipeline names."""
+    """Normalize and validate evaluation pipeline names.
+
+    ``offline`` scores the published ``model.enhance()`` path; ``streaming``
+    scores the frame-causal path the deployed engine actually runs.  They are
+    not interchangeable baselines: a streaming number must be compared against
+    a streaming reference, otherwise the frame-causal loss is charged to
+    whatever else the run was testing.
+    """
     normalized = pipeline.lower().replace("-", "_")
-    if normalized not in frozenset({"offline"}):
-        raise ValueError("Only '--pipeline offline' is implemented for test-set inference.")
+    if normalized not in frozenset({"offline", "streaming"}):
+        raise ValueError("Unsupported pipeline. Use 'offline' or 'streaming'.")
     return normalized
 
 

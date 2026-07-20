@@ -582,12 +582,51 @@ def _build_stftpr_extractor():
     )
 
 
+def _build_melflow_extractor():
+    """Feature extractor matching config/streamfm_melflow.yaml (n_fft=512, hop=256,
+    plain Hann, alpha=0.5, normalized STFT, Nyquist bin cut). Differs from the STFT-PR
+    extractor only in sqrt_window=False (melflow matches HiFi-GAN's plain Hann)."""
+    from sgmse.feature_extractors import CompressedAmplitudeComplexSTFT
+
+    return CompressedAmplitudeComplexSTFT(
+        window="hann",
+        n_fft=512,
+        hop_length=256,
+        sampling_rate=16000,
+        alpha=0.5,
+        beta=1.0,
+        compression_is_learnable=False,
+        normalized_stft=True,
+        cut_highest_freqs=1,
+        sqrt_window=False,
+    )
+
+
+def _build_melflow_projector():
+    """Mel bottleneck matching config/streamfm_melflow.yaml post_Y_fn: magnitude ->
+    80-band slaney Mel -> Mel pseudoinverse. This is the ``M†`` the paper applies before
+    the zero-phase reconstruction for the Mel vocoding degraded baseline."""
+    from sgmse.util.diffphase import PhaselessMelAndBack
+
+    return PhaselessMelAndBack(
+        n_mels=80,
+        sample_rate=16000,
+        f_min=0.0,
+        f_max=8000,
+        n_stft=256,
+        norm="slaney",
+        mel_scale="slaney",
+        alpha=0.5,
+    )
+
+
 def _phase_retrieval_degrade(
     clean: torch.Tensor,
     extractor,
     *,
     phase_mode: str,
     seed: int,
+    mel_projector=None,
 ) -> torch.Tensor:
     """Build the phase-retrieval degraded input for a clean signal.
 
@@ -600,6 +639,10 @@ def _phase_retrieval_degrade(
     """
     x = clean.unsqueeze(0)  # [B=1, C=1, T]
     spec = extractor.forward(x)  # compressed complex STFT [1, 1, F, T]
+    if mel_projector is not None:
+        # Mel bottleneck (M†): magnitude -> Mel -> Mel pseudoinverse. Matches the
+        # melflow model's post_Y_fn, so the baseline is what that model starts from.
+        spec = mel_projector(spec)
     magnitude = spec.abs()
     if phase_mode == "zero":
         degraded_spec = magnitude + 0j
@@ -650,7 +693,14 @@ def score_dataset_phaseless(
         selection_seed=selection_seed,
         crop_mode=crop_mode,
     )
-    extractor = _build_stftpr_extractor()
+    # melflow starts from a Mel-bottlenecked magnitude (M†), stftpr from the full
+    # STFT magnitude; the extractor windowing also differs (see the builders).
+    if task == "melflow":
+        extractor = _build_melflow_extractor()
+        mel_projector = _build_melflow_projector()
+    else:
+        extractor = _build_stftpr_extractor()
+        mel_projector = None
     per_file = []
     for item in items:
         clean, clean_sr = _load_mono(item["clean_path"])
@@ -663,6 +713,7 @@ def score_dataset_phaseless(
             extractor,
             phase_mode=phase_mode,
             seed=phase_seed + int(item["index"]),
+            mel_projector=mel_projector,
         )
         clean, degraded = _align_pair(clean, degraded)
         row = {

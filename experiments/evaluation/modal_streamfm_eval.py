@@ -58,6 +58,13 @@ image = (
         "pytorch-lightning==2.5.1.post0",
         "scipy==1.15.2",
         "tensorboard==2.18.0",
+        # Used only by --pipeline streaming --execution tensorrt.  Pinned to the
+        # exact stack of the benchmark image on purpose: the engine cache key
+        # includes the toolchain versions, so identical pins are what lets a
+        # quality run load the very engine a latency run built.
+        "tensorrt==10.9.0.34",
+        "torch-tensorrt==2.7.0",
+        "nvidia-modelopt[torch]==0.17.0",
         "torch-pesq==0.1.2",
         "torchinfo==1.8.0",
         "tqdm==4.67.1",
@@ -158,6 +165,13 @@ def _run_modal_eval(
     save_inputs: bool,
     continue_on_error: bool,
     config_overrides: list[str] | tuple[str, ...] = (),
+    trt_precision: str = "fp16",
+    trt_calib_steps: int = 32,
+    trt_tf32: str = "auto",
+    trt_optimization_level: int = 3,
+    trt_num_avg_timing_iters: int = 1,
+    trt_workspace_size_bytes: int = 0,
+    trt_engine_cache: str = "off",
 ) -> dict:
     """Run one test-set inference job inside Modal on CPU or CUDA."""
     import torch
@@ -205,6 +219,16 @@ def _run_modal_eval(
         num_interop_threads=num_interop_threads,
         cache_info=cache_info,
         config_overrides=config_overrides,
+        tensorrt_precision=trt_precision,
+        tensorrt_calibration_steps=trt_calib_steps,
+        tensorrt_allow_tf32=(None if trt_tf32 == "auto" else trt_tf32 == "on"),
+        tensorrt_optimization_level=trt_optimization_level,
+        tensorrt_num_avg_timing_iters=trt_num_avg_timing_iters,
+        tensorrt_workspace_size_bytes=trt_workspace_size_bytes,
+        tensorrt_engine_cache=trt_engine_cache,
+        # Left empty on purpose: the shared-volume setup exports the cache
+        # directory, so every container reads and writes the same one.
+        tensorrt_engine_cache_dir="",
     )
 
 
@@ -260,6 +284,13 @@ def main(
     part: str = "model",
     pipeline: str = "offline",
     execution: str = "eager",
+    trt_precision: str = "fp16",
+    trt_calib_steps: int = 32,
+    trt_tf32: str = "auto",
+    trt_optimization_level: int = 3,
+    trt_num_avg_timing_iters: int = 1,
+    trt_workspace_size_bytes: int = 0,
+    trt_engine_cache: str = "off",
     solver: str = "euler",
     steps: int = 5,
     limit: int = 0,
@@ -305,6 +336,13 @@ def main(
         part=part,
         pipeline=pipeline,
         execution=execution,
+        trt_precision=trt_precision,
+        trt_calib_steps=trt_calib_steps,
+        trt_tf32=trt_tf32,
+        trt_optimization_level=trt_optimization_level,
+        trt_num_avg_timing_iters=trt_num_avg_timing_iters,
+        trt_workspace_size_bytes=trt_workspace_size_bytes,
+        trt_engine_cache=trt_engine_cache,
         solver=solver,
         steps=steps,
         limit=limit,
@@ -337,6 +375,13 @@ def main(
         "part": part,
         "pipeline": pipeline,
         "execution": execution,
+        "trt_precision": trt_precision,
+        "trt_calib_steps": trt_calib_steps,
+        "trt_tf32": trt_tf32,
+        "trt_optimization_level": trt_optimization_level,
+        "trt_num_avg_timing_iters": trt_num_avg_timing_iters,
+        "trt_workspace_size_bytes": trt_workspace_size_bytes,
+        "trt_engine_cache": trt_engine_cache,
         "solver": solver,
         "steps": steps,
         "limit": limit,
