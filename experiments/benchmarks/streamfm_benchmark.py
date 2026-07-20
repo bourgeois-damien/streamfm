@@ -122,6 +122,29 @@ def _default_profile_file(args: argparse.Namespace, hardware: str) -> str:
     return str(output_dir / f"{stem}.txt")
 
 
+def _quality_options(args: argparse.Namespace, run_id: str = ""):
+    """Build the quality-run options, or None when timing mode was requested."""
+    if not args.quality_split:
+        return None
+    from experiments.benchmarks.quality import QualityRunOptions
+
+    return QualityRunOptions(
+        split=args.quality_split,
+        data_path=args.quality_data_path,
+        data_format=args.quality_data_format,
+        limit=args.quality_limit,
+        offset=args.quality_offset,
+        selection=args.quality_selection,
+        selection_seed=args.quality_selection_seed,
+        seed=args.quality_seed,
+        crop_mode=args.quality_crop_mode,
+        output_dir=args.quality_output_dir,
+        run_id=args.quality_run_id or run_id,
+        overwrite=args.quality_overwrite,
+        continue_on_error=args.quality_continue_on_error,
+    )
+
+
 def _parse_wandb_tags(tags: str) -> tuple[str, ...]:
     return tuple(tag.strip() for tag in tags.split(",") if tag.strip())
 
@@ -170,8 +193,9 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         "--execution",
         default="auto",
         help=(
-            "Execution: auto, eager, compiled, cuda_graph, tensorrt, or "
-            "tensorrt_cuda_graph (TensorRT is FP32/FP16; add --ptq-int8 for INT8)."
+            "Execution: auto, eager, compiled, cuda_graph, cuda_graph_full, "
+            "tensorrt, or tensorrt_cuda_graph (cuda_graph_full also captures the "
+            "STFT/ISTFT; TensorRT is FP32/FP16, add --ptq-int8 for INT8)."
         ),
     )
     parser.add_argument("--steps", default="1", help="Comma-separated flow step counts.")
@@ -183,8 +207,9 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         default="fp32",
         choices=("fp32", "fp16", "bf16"),
         help=(
-            "Floating dtype. For TensorRT INT8, fp32/fp16 selects the allowed "
-            "floating-point fallback; calibration and engine I/O remain FP32."
+            "Floating dtype. With INT8, fp32/fp16 selects the floating-point "
+            "fallback. CPU PTQ inserts casts around FP32-I/O quantized kernels; "
+            "TensorRT calibration and engine I/O remain FP32."
         ),
     )
     parser.add_argument(
@@ -202,6 +227,21 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
             "TensorRT's disable_tf32 builder setting; matmul precision remains "
             "controlled separately by --matmul-precision."
         ),
+    )
+    parser.add_argument(
+        "--cudnn-benchmark",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Autotune eligible fixed-shape PyTorch cuDNN convolutions during warm-up. "
+            "Applies to CUDA PyTorch execution, not TensorRT."
+        ),
+    )
+    parser.add_argument(
+        "--cudnn-benchmark-limit",
+        type=int,
+        default=10,
+        help="Maximum cuDNN v8 convolution plans to benchmark; 0 tries every available plan.",
     )
     parser.add_argument("--ckpt", default="", help="Optional full checkpoint; compressed checkpoints are detected automatically.")
     parser.add_argument("--num-threads", type=int, default=0, help="CPU only. 0 leaves PyTorch default unchanged.")
@@ -258,6 +298,26 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
             "effectively unbounded-by-the-runner policy."
         ),
     )
+    parser.add_argument(
+        "--trt-engine-cache",
+        default="off",
+        choices=("off", "read", "write", "readwrite"),
+        help=(
+            "Reuse serialized TensorRT engines across runs. 'readwrite' loads a "
+            "matching engine when one exists and stores the build otherwise; a "
+            "different build configuration, GPU or TensorRT version is a miss, so "
+            "it is built and stored alongside the others."
+        ),
+    )
+    parser.add_argument(
+        "--trt-engine-cache-dir",
+        default="",
+        help=(
+            "Directory holding serialized engines. Defaults to "
+            "$STREAMFM_TRT_ENGINE_CACHE_DIR, which Modal runs point at the "
+            "persistent volume."
+        ),
+    )
     parser.add_argument("--output-json", default="")
     parser.add_argument("--history-json", default="")
     parser.add_argument("--save-audio", action="store_true", help="Save returned audio for --pipeline audio runs.")
@@ -267,6 +327,30 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_INPUT_AUDIO,
         help="Optional real audio file for --pipeline audio. Defaults to inputs/test_clips/audio_43m28_10s.wav if present.",
     )
+    # Quality mode: stream a whole dataset split and emit a scorer manifest
+    # instead of timing statistics, so quality and latency share one pipeline.
+    parser.add_argument(
+        "--quality-split",
+        default="",
+        help="Run quality mode over this split (test/valid/train) instead of timing a single buffer. Requires --pipeline audio.",
+    )
+    parser.add_argument("--quality-limit", type=int, default=0, help="Quality mode: number of files. 0 = the whole split.")
+    parser.add_argument("--quality-offset", type=int, default=0)
+    parser.add_argument(
+        "--quality-selection",
+        default="random",
+        choices=("random", "first", "sequential"),
+        help="Quality mode: how to pick files. Must match the evaluation runs it is compared against.",
+    )
+    parser.add_argument("--quality-selection-seed", type=int, default=42)
+    parser.add_argument("--quality-seed", type=int, default=42, help="Quality mode: per-file solver seed base (file_seed = seed + index). 42 matches the evaluation default.")
+    parser.add_argument("--quality-crop-mode", default="full", choices=("full", "crop"))
+    parser.add_argument("--quality-output-dir", default="", help="Quality mode: root for enhanced WAVs and manifests. Defaults to outputs/benchmark_quality.")
+    parser.add_argument("--quality-run-id", default="", help="Quality mode: run directory name. Defaults to the generated benchmark run id.")
+    parser.add_argument("--quality-data-path", default="", help="Quality mode: override the split path from the checkpoint config.")
+    parser.add_argument("--quality-data-format", default="", help="Quality mode: override the data-module format.")
+    parser.add_argument("--quality-overwrite", action="store_true", help="Quality mode: replace existing enhanced WAVs.")
+    parser.add_argument("--quality-continue-on-error", action="store_true", help="Quality mode: record per-file failures and keep going.")
     parser.add_argument(
         "--profile",
         action="store_true",
@@ -301,7 +385,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
 def _run_local(args: argparse.Namespace, hardware: str) -> None:
     """Run the benchmark directly on local hardware."""
     device = select_torch_device(hardware)
-    if args.execution.replace("-", "_").lower() == "cuda_graph" and device.type != "cuda":
+    if args.execution.replace("-", "_").lower() in {"cuda_graph", "cuda_graph_full"} and device.type != "cuda":
         raise ValueError("execution=cuda_graph requires local CUDA hardware.")
 
     if args.profile and not args.profile_file:
@@ -324,6 +408,8 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
         model_dtype_name=args.dtype,
         float32_matmul_precision=args.matmul_precision,
         tf32_mode=args.tf32,
+        cudnn_benchmark=args.cudnn_benchmark,
+        cudnn_benchmark_limit=args.cudnn_benchmark_limit,
         device=device,
         paths=paths,
         backend="local",
@@ -343,6 +429,9 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
         tensorrt_optimization_level=args.trt_optimization_level,
         tensorrt_num_avg_timing_iters=args.trt_avg_timing_iters,
         tensorrt_workspace_size_mib=args.trt_workspace_size_mib,
+        tensorrt_engine_cache=args.trt_engine_cache,
+        tensorrt_engine_cache_dir=args.trt_engine_cache_dir,
+        quality=_quality_options(args),
     )
     _save_audio_results(results, args, backend="local", hardware=hardware)
     record_benchmark_results(
@@ -369,6 +458,8 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
             "model_dtype": args.dtype,
             "matmul_precision": args.matmul_precision,
             "tf32": args.tf32,
+            "cudnn_benchmark": args.cudnn_benchmark,
+            "cudnn_benchmark_limit": args.cudnn_benchmark_limit,
             "ckpt": args.ckpt,
             "num_threads": args.num_threads,
             "num_interop_threads": args.num_interop_threads,
@@ -379,6 +470,7 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
             "trt_optimization_level": args.trt_optimization_level,
             "trt_avg_timing_iters": args.trt_avg_timing_iters,
             "trt_workspace_size_mib": args.trt_workspace_size_mib,
+            "trt_engine_cache": args.trt_engine_cache,
             "save_audio": args.save_audio,
             "audio_output_dir": args.audio_output_dir,
             "input_audio": args.input_audio_path,
@@ -436,7 +528,12 @@ def _run_modal(args: argparse.Namespace, hardware: str) -> None:
         str(args.trt_avg_timing_iters),
         "--trt-workspace-size-mib",
         str(args.trt_workspace_size_mib),
+        "--trt-engine-cache",
+        args.trt_engine_cache,
     ]
+    if args.cudnn_benchmark:
+        command.append("--cudnn-benchmark")
+        command.extend(["--cudnn-benchmark-limit", str(args.cudnn_benchmark_limit)])
     command.extend(["--audio-duration-s", str(args.audio_duration_s)])
     if args.ckpt:
         command.extend(["--ckpt", args.ckpt])
@@ -463,6 +560,30 @@ def _run_modal(args: argparse.Namespace, hardware: str) -> None:
         command.extend(["--audio-output-dir", args.audio_output_dir])
     if args.input_audio_path:
         command.extend(["--input-audio", args.input_audio_path])
+    if args.quality_split:
+        command.extend(
+            [
+                "--quality-split", args.quality_split,
+                "--quality-limit", str(args.quality_limit),
+                "--quality-offset", str(args.quality_offset),
+                "--quality-selection", args.quality_selection,
+                "--quality-selection-seed", str(args.quality_selection_seed),
+                "--quality-seed", str(args.quality_seed),
+                "--quality-crop-mode", args.quality_crop_mode,
+            ]
+        )
+        if args.quality_output_dir:
+            command.extend(["--quality-output-dir", args.quality_output_dir])
+        if args.quality_run_id:
+            command.extend(["--quality-run-id", args.quality_run_id])
+        if args.quality_data_path:
+            command.extend(["--quality-data-path", args.quality_data_path])
+        if args.quality_data_format:
+            command.extend(["--quality-data-format", args.quality_data_format])
+        if args.quality_overwrite:
+            command.append("--quality-overwrite")
+        if args.quality_continue_on_error:
+            command.append("--quality-continue-on-error")
     if args.output_json:
         command.extend(["--output-json", args.output_json])
     if args.history_json:
@@ -487,8 +608,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Unified Stream.FM benchmark launcher.")
     _add_common_args(parser)
     args = parser.parse_args()
-    args.input_audio_path = _resolve_input_audio_path(args)
-    args.iterations = _resolve_iterations(args)
+    args.quality_split = args.quality_split.strip().lower()
+    if args.quality_split:
+        # Quality mode reads its audio from the split and derives the frame
+        # count per file, so the single-clip options do not apply.
+        args.input_audio_path = ""
+        args.iterations = max(args.iterations, 1)
+    else:
+        args.input_audio_path = _resolve_input_audio_path(args)
+        args.iterations = _resolve_iterations(args)
 
     backend = "local" if args.local else args.backend
     hardware = args.hardware
