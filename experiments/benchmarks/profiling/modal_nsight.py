@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
+import time
 import uuid
 
 import modal
@@ -54,7 +56,7 @@ image = (
         "https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /' "
         "> /etc/apt/sources.list.d/nvidia-devtools.list",
         "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "
-        "--no-install-recommends nsight-systems-cli-2026.3.1 && "
+        "--no-install-recommends nsight-systems-cli-2026.3.1 nsight-compute-2025.3.1 && "
         "rm -rf /var/lib/apt/lists/*",
     )
     .pip_install(
@@ -111,6 +113,149 @@ def _run_checked(command: list[str], *, env: dict[str, str], cwd: str) -> subpro
         stderr=subprocess.STDOUT,
         check=False,
     )
+
+
+def _run_diagnostic(command: list[str], *, env: dict[str, str], cwd: str) -> dict:
+    """Run one profiler/diagnostic command and retain unambiguous process status.
+
+    A positive return code is an ordinary application/tool exit code.  Only a
+    negative return code means subprocess observed termination by a signal.
+    Keeping stdout and stderr separate is important for Nsight, whose own
+    diagnostics otherwise get mixed with the target application's output.
+    """
+    started_at = time.perf_counter()
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        return {
+            "command": command,
+            "returncode": None,
+            "exit_code": None,
+            "signal_number": None,
+            "signal_name": None,
+            "duration_s": time.perf_counter() - started_at,
+            "stdout": "",
+            "stderr": f"{type(exc).__name__}: {exc}",
+        }
+
+    returncode = result.returncode
+    signal_number = -returncode if returncode < 0 else None
+    return {
+        "command": command,
+        "returncode": returncode,
+        "exit_code": returncode if returncode >= 0 else None,
+        "signal_number": signal_number,
+        "signal_name": (
+            signal.Signals(signal_number).name if signal_number is not None else None
+        ),
+        "duration_s": time.perf_counter() - started_at,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def _persist_command_result(output_dir: Path, name: str, result: dict) -> dict:
+    """Write command streams separately and return compact JSON metadata."""
+    stdout_path = output_dir / f"{name}.stdout.log"
+    stderr_path = output_dir / f"{name}.stderr.log"
+    stdout_path.write_text(result.get("stdout", ""), encoding="utf-8")
+    stderr_path.write_text(result.get("stderr", ""), encoding="utf-8")
+    return {
+        key: value
+        for key, value in result.items()
+        if key not in {"stdout", "stderr"}
+    } | {
+        "stdout_file": stdout_path.name,
+        "stderr_file": stderr_path.name,
+        "stdout_bytes": stdout_path.stat().st_size,
+        "stderr_bytes": stderr_path.stat().st_size,
+    }
+
+
+def _add_profiler_library_paths(env: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+    """Expose CUPTI/NVPerf libraries that standalone profiler packages do not register."""
+    candidates = []
+    for root in (
+        Path("/opt/nvidia/nsight-compute"),
+        Path("/usr/local/cuda/extras/CUPTI"),
+        Path("/usr/local/cuda/targets/x86_64-linux/lib"),
+    ):
+        if not root.exists():
+            continue
+        for pattern in ("libnvperf_host.so*", "libnvperf_target.so*", "libcupti.so*"):
+            candidates.extend(path.parent for path in root.rglob(pattern) if path.is_file())
+    directories = sorted({str(path) for path in candidates})
+    updated = env.copy()
+    if directories:
+        existing = updated.get("LD_LIBRARY_PATH", "")
+        updated["LD_LIBRARY_PATH"] = ":".join([*directories, existing] if existing else directories)
+    return updated, directories
+
+
+def _collect_environment_diagnostics(output_dir: Path, *, env: dict[str, str]) -> dict:
+    """Capture enough environment detail to explain profiler compatibility failures."""
+    commands = {
+        "nsys_version": ["nsys", "--version"],
+        "ncu_version": ["ncu", "--version"],
+        "nvcc_version": ["nvcc", "--version"],
+        "nvidia_smi": [
+            "nvidia-smi",
+            "--query-gpu=name,uuid,driver_version,compute_cap,memory.total",
+            "--format=csv,noheader",
+        ],
+        "uname": ["uname", "-a"],
+        "id": ["id"],
+        "nsys_status": ["nsys", "status", "-e"],
+        "ncu_location": ["bash", "-lc", "readlink -f \"$(command -v ncu)\""],
+        "profiler_libraries": [
+            "bash",
+            "-lc",
+            "find /opt/nvidia/nsight-compute /usr/local/cuda -type f "
+            "\\( -name 'libnvperf*.so*' -o -name 'libcupti.so*' \\) 2>/dev/null | sort",
+        ],
+        "python_cuda": [
+            sys.executable,
+            "-c",
+            (
+                "import json, torch; "
+                "print(json.dumps({'python': __import__('sys').version, "
+                "'torch': torch.__version__, 'torch_cuda': torch.version.cuda, "
+                "'cuda_available': torch.cuda.is_available(), "
+                "'device': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None, "
+                "'properties': str(torch.cuda.get_device_properties(0)) if torch.cuda.is_available() else None}))"
+            ),
+        ],
+    }
+    diagnostic_runs = {}
+    for name, command in commands.items():
+        result = _run_diagnostic(command, env=env, cwd=REMOTE_ROOT)
+        diagnostic_runs[name] = _persist_command_result(output_dir, name, result)
+
+    paranoid_path = Path("/proc/sys/kernel/perf_event_paranoid")
+    diagnostics = {
+        "commands": diagnostic_runs,
+        "perf_event_paranoid": (
+            paranoid_path.read_text(encoding="utf-8").strip()
+            if paranoid_path.exists()
+            else None
+        ),
+        "environment": {
+            key: os.environ.get(key)
+            for key in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES")
+        },
+    }
+    (output_dir / "diagnostics.json").write_text(
+        json.dumps(diagnostics, indent=2), encoding="utf-8"
+    )
+    return diagnostics
 
 
 def _target_command(
@@ -192,6 +337,7 @@ def capture_nsys(
     trt_optimization_level: int,
     trt_avg_timing_iters: int,
     trt_workspace_size_mib: int,
+    nsys_cuda_trace: str,
     require_full_compilation: bool,
     run_id: str,
 ) -> dict:
@@ -206,10 +352,11 @@ def capture_nsys(
     report_base = output_dir / "streamfm"
     report_path = report_base.with_suffix(".nsys-rep")
 
-    env = os.environ.copy()
+    env, _ = _add_profiler_library_paths(os.environ.copy())
     env["PYTHONPATH"] = REMOTE_ROOT
     env["STREAMFM_CUDA_PROFILE_FRAMES"] = str(profile_frames)
     env["STREAMFM_TRT_REQUIRE_FULL_COMPILATION"] = "1" if require_full_compilation else "0"
+    diagnostics = _collect_environment_diagnostics(output_dir, env=env)
 
     target = _target_command(
         execution=execution,
@@ -230,21 +377,19 @@ def capture_nsys(
         "profile",
         "--force-overwrite=true",
         "--sample=none",
+        "--cpuctxsw=none",
         # Modal's gVisor kernel does not expose perf_event_open.  CUDA and
         # NVTX tracing use CUPTI and remain useful; OS-runtime/CPU sampling is
         # intentionally disabled rather than requested and then silently lost.
-        "--trace=cuda,nvtx",
+        f"--trace={nsys_cuda_trace},nvtx",
         "--capture-range=cudaProfilerApi",
         "--capture-range-end=stop",
         "--cuda-graph-trace=node",
         f"--output={report_base}",
         *target,
     ]
-    run = _run_checked(nsys_command, env=env, cwd=REMOTE_ROOT)
-    (output_dir / "nsys_profile.log").write_text(run.stdout, encoding="utf-8")
-
-    status = _run_checked(["nsys", "status", "-e"], env=env, cwd=REMOTE_ROOT)
-    (output_dir / "nsys_status.txt").write_text(status.stdout, encoding="utf-8")
+    run = _run_diagnostic(nsys_command, env=env, cwd=REMOTE_ROOT)
+    run_metadata = _persist_command_result(output_dir, "nsys_profile", run)
 
     # Pre-render the standard stats tables to text so the results are readable
     # without downloading the report into the Nsight GUI.
@@ -259,12 +404,15 @@ def capture_nsys(
     stats_chunks = []
     if report_path.exists():
         for report in reports:
-            result = _run_checked(
+            result = _run_diagnostic(
                 ["nsys", "stats", "--report", report, str(report_path)],
                 env=env,
                 cwd=REMOTE_ROOT,
             )
-            stats_chunks.append(f"\n===== {report} (exit {result.returncode}) =====\n{result.stdout}")
+            stats_chunks.append(
+                f"\n===== {report} (exit {result['returncode']}) =====\n"
+                f"{result['stdout']}\n{result['stderr']}"
+            )
     stats_text = "".join(stats_chunks)
     (output_dir / "nsys_stats.txt").write_text(stats_text, encoding="utf-8")
 
@@ -290,10 +438,19 @@ def capture_nsys(
         "trt_avg_timing_iters": trt_avg_timing_iters,
         "trt_workspace_size_mib": trt_workspace_size_mib,
         "require_full_compilation": require_full_compilation,
-        "nsys_exit_code": run.returncode,
+        "nsys_cuda_trace": nsys_cuda_trace,
+        "nsys_exit_code": run["returncode"],
+        "nsys_run": run_metadata,
         "report_exists": report_path.exists(),
         "report_bytes": report_path.stat().st_size if report_path.exists() else 0,
+        "capture_valid": (
+            run["returncode"] == 0
+            and report_path.exists()
+            and report_path.stat().st_size > 0
+        ),
         "ncu_path": ncu_path,
+        "diagnostics_file": "diagnostics.json",
+        "perf_event_paranoid": diagnostics["perf_event_paranoid"],
     }
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     CACHE_VOLUME.commit()
@@ -331,10 +488,11 @@ def capture_ncu(
     output_dir.mkdir(parents=True, exist_ok=False)
     report_base = output_dir / "streamfm"
     report_path = report_base.with_suffix(".ncu-rep")
-    env = os.environ.copy()
+    env, _ = _add_profiler_library_paths(os.environ.copy())
     env["PYTHONPATH"] = REMOTE_ROOT
     env["STREAMFM_CUDA_PROFILE_FRAMES"] = str(profile_frames)
     env["STREAMFM_TRT_REQUIRE_FULL_COMPILATION"] = "1" if require_full_compilation else "0"
+    diagnostics = _collect_environment_diagnostics(output_dir, env=env)
     target = _target_command(
         execution=execution,
         dtype=dtype,
@@ -367,16 +525,18 @@ def capture_ncu(
         str(report_base),
         *target,
     ]
-    run = _run_checked(command, env=env, cwd=REMOTE_ROOT)
-    (output_dir / "ncu_profile.log").write_text(run.stdout, encoding="utf-8")
+    run = _run_diagnostic(command, env=env, cwd=REMOTE_ROOT)
+    run_metadata = _persist_command_result(output_dir, "ncu_profile", run)
     details = ""
+    import_metadata = None
     if report_path.exists():
-        imported = _run_checked(
+        imported = _run_diagnostic(
             ["ncu", "--import", str(report_path), "--page", "details"],
             env=env,
             cwd=REMOTE_ROOT,
         )
-        details = imported.stdout
+        import_metadata = _persist_command_result(output_dir, "ncu_import", imported)
+        details = f"{imported['stdout']}\n{imported['stderr']}"
     (output_dir / "ncu_details.txt").write_text(details, encoding="utf-8")
     metadata = {
         "run_id": run_id,
@@ -398,11 +558,164 @@ def capture_ncu(
         "ncu_set": ncu_set,
         "launch_skip": launch_skip,
         "launch_count": launch_count,
-        "ncu_exit_code": run.returncode,
+        "ncu_exit_code": run["returncode"],
+        "ncu_run": run_metadata,
+        "ncu_import": import_metadata,
         "report_exists": report_path.exists(),
         "report_bytes": report_path.stat().st_size if report_path.exists() else 0,
+        "capture_valid": (
+            run["returncode"] == 0
+            and report_path.exists()
+            and report_path.stat().st_size > 0
+        ),
+        "diagnostics_file": "diagnostics.json",
+        "perf_event_paranoid": diagnostics["perf_event_paranoid"],
     }
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    CACHE_VOLUME.commit()
+    return metadata
+
+
+def _classify_ncu_probe(*, baseline: dict, profiled: dict, report_path: Path) -> str:
+    """Classify a minimal NCU probe without confusing target and profiler failures."""
+    if baseline["returncode"] != 0:
+        return "target_failed"
+    combined = f"{profiled.get('stdout', '')}\n{profiled.get('stderr', '')}".lower()
+    if "err_nvgpuctrperm" in combined or (
+        "permission" in combined and "performance counter" in combined
+    ):
+        return "permission_denied"
+    if "librarynotloaded" in combined or "compatible driver library" in combined:
+        return "counter_library_unavailable"
+    if "metric" in combined and any(
+        marker in combined for marker in ("not found", "not available", "unsupported")
+    ):
+        return "metric_unavailable"
+    if (
+        profiled["returncode"] == 0
+        and report_path.exists()
+        and report_path.stat().st_size > 0
+    ):
+        return "allowed"
+    return "profiler_failed"
+
+
+@app.function(gpu="L4", timeout=900, volumes={VOLUME_ROOT: CACHE_VOLUME})
+def probe_ncu_permissions(*, run_id: str) -> dict:
+    """Test one hardware counter on one CUDA kernel, independently of StreamFM.
+
+    This intentionally excludes PyTorch, TensorRT, CUDA Graph and
+    cudaProfilerStart/Stop so the result answers only whether NCU can collect a
+    protected GPU metric in the Modal container.
+    """
+    output_dir = Path(PROFILE_ROOT) / run_id
+    output_dir.mkdir(parents=True, exist_ok=False)
+    env, added_library_paths = _add_profiler_library_paths(os.environ.copy())
+    env["PYTHONPATH"] = REMOTE_ROOT
+    diagnostics = _collect_environment_diagnostics(output_dir, env=env)
+
+    source = Path(REMOTE_ROOT) / "experiments/benchmarks/profiling/ncu_probe.cu"
+    binary = output_dir / "ncu_probe"
+    report_base = output_dir / "ncu_probe_report"
+    report_path = report_base.with_suffix(".ncu-rep")
+
+    compile_result = _run_diagnostic(
+        ["nvcc", "-O2", "-lineinfo", str(source), "-o", str(binary)],
+        env=env,
+        cwd=REMOTE_ROOT,
+    )
+    compile_metadata = _persist_command_result(output_dir, "probe_compile", compile_result)
+
+    if compile_result["returncode"] == 0:
+        baseline = _run_diagnostic([str(binary)], env=env, cwd=REMOTE_ROOT)
+    else:
+        baseline = {
+            "command": [str(binary)],
+            "returncode": None,
+            "exit_code": None,
+            "signal_number": None,
+            "signal_name": None,
+            "duration_s": 0.0,
+            "stdout": "",
+            "stderr": "probe was not executed because nvcc compilation failed",
+        }
+    baseline_metadata = _persist_command_result(output_dir, "probe_baseline", baseline)
+
+    metric_query = _run_diagnostic(
+        ["ncu", "--query-metrics", "--query-metrics-mode", "all"],
+        env=env,
+        cwd=REMOTE_ROOT,
+    )
+    metric_query_metadata = _persist_command_result(
+        output_dir, "probe_metric_query", metric_query
+    )
+
+    if baseline["returncode"] == 0:
+        profiled = _run_diagnostic(
+            [
+                "ncu",
+                "--target-processes",
+                "all",
+                "--metrics",
+                "sm__cycles_elapsed.avg",
+                "--launch-count",
+                "1",
+                "--clock-control",
+                "none",
+                "--force-overwrite",
+                "--export",
+                str(report_base),
+                str(binary),
+            ],
+            env=env,
+            cwd=REMOTE_ROOT,
+        )
+    else:
+        profiled = {
+            "command": ["ncu", str(binary)],
+            "returncode": None,
+            "exit_code": None,
+            "signal_number": None,
+            "signal_name": None,
+            "duration_s": 0.0,
+            "stdout": "",
+            "stderr": "NCU was not executed because the baseline target failed",
+        }
+    profiled_metadata = _persist_command_result(output_dir, "probe_ncu", profiled)
+    classification = _classify_ncu_probe(
+        baseline=baseline, profiled=profiled, report_path=report_path
+    )
+
+    imported_metadata = None
+    if report_path.exists():
+        imported = _run_diagnostic(
+            ["ncu", "--import", str(report_path), "--page", "details"],
+            env=env,
+            cwd=REMOTE_ROOT,
+        )
+        imported_metadata = _persist_command_result(output_dir, "probe_import", imported)
+
+    metadata = {
+        "run_id": run_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "tool": "ncu_probe",
+        "classification": classification,
+        "counter_access_allowed": classification == "allowed",
+        "metric": "sm__cycles_elapsed.avg",
+        "added_profiler_library_paths": added_library_paths,
+        "compile": compile_metadata,
+        "baseline": baseline_metadata,
+        "metric_query": metric_query_metadata,
+        "profiled": profiled_metadata,
+        "imported": imported_metadata,
+        "report_exists": report_path.exists(),
+        "report_bytes": report_path.stat().st_size if report_path.exists() else 0,
+        "diagnostics_file": "diagnostics.json",
+        "perf_event_paranoid": diagnostics["perf_event_paranoid"],
+    }
+    (output_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2), encoding="utf-8"
+    )
     CACHE_VOLUME.commit()
     return metadata
 
@@ -499,6 +812,7 @@ def main(
     trt_optimization_level: int = 3,
     trt_avg_timing_iters: int = 1,
     trt_workspace_size_mib: int = 0,
+    nsys_cuda_trace: str = "cuda-sw",
     require_full_compilation: bool = True,
     output_dir: str = "outputs/nsight_streamfm",
     ncu_set: str = "basic",
@@ -506,15 +820,42 @@ def main(
     launch_count: int = 1,
 ):
     """Dispatch one capture to the right Modal function, then download its artifacts locally."""
-    if tool not in {"nsys", "ncu", "torch"}:
-        raise ValueError("tool must be nsys, ncu, or torch.")
+    if tool not in {"nsys", "ncu", "ncu_probe", "torch"}:
+        raise ValueError("tool must be nsys, ncu, ncu_probe, or torch.")
+    if nsys_cuda_trace not in {"cuda", "cuda-sw"}:
+        raise ValueError("nsys_cuda_trace must be cuda or cuda-sw.")
+
+    if tool == "ncu_probe":
+        run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_ncu_probe_{uuid.uuid4().hex[:8]}"
+        metadata = probe_ncu_permissions.remote(run_id=run_id)
+        local_root = Path(output_dir)
+        local_root.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "modal",
+                "volume",
+                "get",
+                "--force",
+                "streamfm-cache",
+                f"nsight_streamfm/{run_id}",
+                str(local_root),
+            ],
+            check=True,
+        )
+        print(json.dumps(metadata, indent=2))
+        print(f"Downloaded NCU probe artifacts to {local_root / run_id}")
+        return
     if execution == "tensorrt_cuda_graph":
         # Same run as execution=tensorrt + cuda_graph=True; keep the split
         # form internally so run ids and metadata stay consistent.
         execution = "tensorrt"
         cuda_graph = True
-    if execution not in {"tensorrt", "cuda_graph"}:
-        raise ValueError("Nsight capture currently supports execution=tensorrt, tensorrt_cuda_graph, or cuda_graph.")
+    if execution not in {"eager", "compiled", "tensorrt", "cuda_graph"}:
+        raise ValueError(
+            "Profiling supports eager, compiled, cuda_graph, tensorrt, or tensorrt_cuda_graph."
+        )
     if dtype not in {"fp32", "fp16"}:
         raise ValueError("Nsight capture supports dtype=fp32 or fp16.")
     if ptq_int8 and execution != "tensorrt":
@@ -563,7 +904,10 @@ def main(
     elif tool == "torch":
         metadata = capture_torch_trace.remote(**common)
     else:
-        metadata = capture_nsys.remote(**common)
+        metadata = capture_nsys.remote(
+            **common,
+            nsys_cuda_trace=nsys_cuda_trace,
+        )
     local_root = Path(output_dir)
     local_root.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -580,5 +924,16 @@ def main(
         ],
         check=True,
     )
+    run_dir = local_root / run_id
+    if tool == "torch":
+        from experiments.benchmarks.profiling.analyze_trace import analyze_trace
+
+        trace_path = run_dir / "streamfm_perfetto_trace.json.gz"
+        metadata_path = run_dir / "metadata.json"
+        if trace_path.exists():
+            analysis = analyze_trace(trace_path, metadata_path)
+            (run_dir / "trace_analysis.json").write_text(
+                json.dumps(analysis, indent=2), encoding="utf-8"
+            )
     print(json.dumps(metadata, indent=2))
-    print(f"Downloaded Nsight artifacts to {local_root / run_id}")
+    print(f"Downloaded Nsight artifacts to {run_dir}")
