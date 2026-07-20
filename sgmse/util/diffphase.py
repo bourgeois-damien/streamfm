@@ -2,7 +2,6 @@ from typing import Optional
 import torch
 import torchaudio
 import numpy as np
-import matplotlib.pyplot as plt, matplotlib as mpl
 
 
 class ComplexAbs(torch.nn.Module):
@@ -85,6 +84,8 @@ def ccmap_img(cimg, amp_tf=lambda a: a, inv=False, mult=True, cmap='hsv', prange
         - mult=False: The opacity (i.e., large amplitudes map to high saturation, when the background is white).
         - mult=True: The brightness, by multiplying all RGB channels with the normalized amplitudes.
     """
+    import matplotlib as mpl
+
     cmp = mpl.colormaps.get_cmap(cmap)
     a = np.abs(cimg)
     p = np.angle(cimg)
