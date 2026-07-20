@@ -323,10 +323,12 @@ def run_backbone_profile(
     dtype_name: str = "fp32",
     memory_format: str = "channels_last",
     iterations: int = 40,
+    profile_iterations: int = 0,
     warmup: int = 10,
     freq_bins: int = 256,
     num_threads: int = 1,
     num_interop_threads: int = 1,
+    checkpoint_name: str = "",
     paths=None,
     gpu_name: str = "",
 ) -> dict[str, Any]:
@@ -346,7 +348,13 @@ def run_backbone_profile(
     dtype = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     if paths is None:
         paths = make_benchmark_paths(REPO_ROOT)
-    model, _cfg = load_flow_model(torch_device, dtype, paths, task=task)
+    model, _cfg = load_flow_model(
+        torch_device,
+        dtype,
+        paths,
+        task=task,
+        checkpoint_name=checkpoint_name or None,
+    )
     dnn = model.dnn if hasattr(model, "dnn") else model
     dnn = apply_model_memory_format(dnn, memory_format)
     dnn.eval()
@@ -396,10 +404,13 @@ def run_backbone_profile(
     if torch_device.type == "cuda":
         activities.append(ProfilerActivity.CUDA)
 
+    profiled_frames = profile_iterations or iterations
+    if profiled_frames < 1:
+        raise ValueError("profile_iterations must be positive when provided.")
     try:
         with torch.inference_mode():
             with profile(activities=activities, record_shapes=True, profile_memory=False) as prof:
-                for _ in range(iterations):
+                for _ in range(profiled_frames):
                     dnn.forward_step(y, time_cond=t, state=state)
                 if torch_device.type == "cuda":
                     torch.cuda.synchronize()
@@ -437,10 +448,10 @@ def run_backbone_profile(
         entry = {
             **metadata,
             "calls": calls,
-            "calls_per_frame": calls / max(1, iterations),
+            "calls_per_frame": calls / profiled_frames,
             "self_ms_per_call": self_us / 1000.0 / calls,
             "inclusive_ms_per_call": total_us / 1000.0 / calls,
-            "inclusive_ms_per_frame": total_us / 1000.0 / max(1, iterations),
+            "inclusive_ms_per_frame": total_us / 1000.0 / profiled_frames,
         }
         if metadata["kind"] in {"causal_conv2d", "conv2d"}:
             entry["macs_per_call"] = _conv_macs(metadata)
@@ -466,11 +477,13 @@ def run_backbone_profile(
             "dtype": dtype_name,
             "memory_format": memory_format,
             "iterations": iterations,
+            "profile_iterations": profiled_frames,
             "warmup": warmup,
             "freq_bins": freq,
             "input_channels": in_ch,
             "num_threads": num_threads,
             "num_interop_threads": num_interop_threads,
+            "checkpoint_name": checkpoint_name,
             "execution": "eager_uncompiled",
         },
         "wall_ms": {
@@ -496,7 +509,7 @@ def run_backbone_profile(
 
 
 def _print_report(report: dict[str, Any]) -> None:
-    iters = max(1, int(report["config"]["iterations"]))
+    iters = max(1, int(report["config"].get("profile_iterations", report["config"]["iterations"])))
     print(json.dumps({"wall_ms": report["wall_ms"], "inventory": report["inventory"], "config": report["config"]}, indent=2))
     print("\n=== Stages (inclusive ms/frame) ===")
     for e in report["stages"]:
@@ -524,10 +537,21 @@ def main() -> None:
     parser.add_argument("--dtype", default="fp32", choices=("fp32", "fp16", "bf16"))
     parser.add_argument("--memory-format", default="channels_last")
     parser.add_argument("--iterations", type=int, default=40)
+    parser.add_argument(
+        "--profile-iterations",
+        type=int,
+        default=0,
+        help="Frames recorded by torch.profiler (default: all timed iterations). Use 1-3 for slow FP16 paths.",
+    )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--freq-bins", type=int, default=256)
     parser.add_argument("--num-threads", type=int, default=1)
     parser.add_argument("--num-interop-threads", type=int, default=1)
+    parser.add_argument(
+        "--ckpt",
+        default="",
+        help="Checkpoint name relative to checkpoints/, for example compressed/streamfm_stftpr_k5.ckpt.",
+    )
     parser.add_argument(
         "--out",
         default="outputs/benchmark_profiles/backbone_profile.json",
@@ -541,10 +565,12 @@ def main() -> None:
         dtype_name=args.dtype,
         memory_format=args.memory_format,
         iterations=args.iterations,
+        profile_iterations=args.profile_iterations,
         warmup=args.warmup,
         freq_bins=args.freq_bins,
         num_threads=args.num_threads,
         num_interop_threads=args.num_interop_threads,
+        checkpoint_name=args.ckpt,
     )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
