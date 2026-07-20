@@ -57,6 +57,17 @@ def _enable_functional_state_updates(model) -> None:
             module.functional_state_updates = True
 
 
+def _state_signature(state_tensors) -> str:
+    """Describe the recurrent-state contract that an engine was built against.
+
+    A cached engine hard-codes the number, shape and dtype of its state
+    tensors, so a mismatch here must be a cache miss rather than a load error.
+    """
+    return ";".join(
+        f"{tuple(tensor.shape)}:{tensor.dtype}" for tensor in state_tensors
+    )
+
+
 def _make_step_module(model, state_template):
     """Wrap the model as a pure module: (x, t, *flat_state) -> (y, *flat_next_state).
 
@@ -185,6 +196,8 @@ class TensorRTStreamingAdapter:
         optimization_level: int = 3,
         num_avg_timing_iters: int = 1,
         workspace_size_bytes: int = 0,
+        engine_cache: str = "off",
+        engine_cache_dir=None,
     ):
         import torch
 
@@ -235,7 +248,51 @@ class TensorRTStreamingAdapter:
         self.memory_format = memory_format
         self.input_freqs = int(self.model.input_freqs)
         self.input_channels = int(self.model.input_layer.in_channels)
-        if precision == "int8":
+
+        # 2b) Consult the engine cache before any expensive work.  The key is
+        # derived from the *unquantized* weights plus the build settings, so a
+        # hit skips calibration and compilation alike.
+        from experiments.benchmarks.tensorrt.engine_cache import (
+            EngineCache,
+            build_cache_config,
+            compute_cache_key,
+            model_signature,
+        )
+
+        cache = EngineCache(engine_cache, engine_cache_dir)
+        self.engine_cache_mode = cache.mode
+        cache_key = ""
+        cache_config: dict[str, Any] = {}
+        cached_entry = None
+        if cache.enabled:
+            cache_config = build_cache_config(
+                model_hash=model_signature(self.model),
+                precision=precision,
+                dtype=str(dtype).replace("torch.", ""),
+                int8_fallback_dtype=str(int8_fallback_dtype).replace("torch.", ""),
+                calibration_steps=calibration_steps,
+                memory_format=memory_format,
+                allow_tf32=allow_tf32,
+                optimization_level=optimization_level,
+                num_avg_timing_iters=num_avg_timing_iters,
+                workspace_size_bytes=workspace_size_bytes,
+                require_full_compilation=(
+                    os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
+                ),
+                input_channels=self.input_channels,
+                input_freqs=self.input_freqs,
+                state_signature=_state_signature(
+                    _flatten_tensor_state(self.model.init_state())
+                ),
+            )
+            cache_key = compute_cache_key(cache_config)
+            cached_entry = cache.lookup(precision, cache_key)
+        self.engine_cache_key = cache_key
+
+        # Calibration only shapes the engine that is about to be built; when a
+        # cached engine already carries its Q/DQ ranges, paying for it again
+        # would change nothing.
+        if precision == "int8" and cached_entry is None:
             self.model = _apply_tensorrt_int8_ptq(
                 self.model,
                 input_channels=self.input_channels,
@@ -250,8 +307,20 @@ class TensorRTStreamingAdapter:
         torch_memory_format = (
             torch.channels_last if memory_format == "channels_last" else torch.contiguous_format
         )
+        # Seeded on purpose: this tensor is both the export example input and
+        # the input of the engine-vs-eager check below.  A fresh random draw
+        # would make that check incomparable between a build and a later reload
+        # of the very same engine, which is exactly the comparison the engine
+        # cache has to support.
+        example_generator = torch.Generator(device="cuda").manual_seed(20240717)
         x = torch.randn(
-            1, self.input_channels, self.input_freqs, 1, device="cuda", dtype=dtype
+            1,
+            self.input_channels,
+            self.input_freqs,
+            1,
+            generator=example_generator,
+            device="cuda",
+            dtype=dtype,
         ).contiguous(memory_format=torch_memory_format)
         time_cond = torch.full((1,), 0.5, device="cuda", dtype=dtype)
         compile_kwargs = {
@@ -268,11 +337,32 @@ class TensorRTStreamingAdapter:
             # automatic workspace policy; a positive value is a hard cap.
             "workspace_size": workspace_size_bytes,
         }
+        # Asking for the engine inspector dump is only useful if the engine
+        # carries per-layer detail, and Torch-TensorRT 2.7 sets TensorRT's
+        # profiling verbosity to DETAILED exclusively under ``debug``
+        # (_TRTInterpreter.py:216-221); otherwise the inspector reports layer
+        # names with no precisions, which is precisely the field an INT8 claim
+        # needs.  ``debug`` gates logging, the progress monitor, partitioner
+        # verbosity and profiling verbosity only -- it changes neither kernel
+        # selection nor the partitioning itself -- so the engine it produces is
+        # the same engine, just self-describing.
+        if os.environ.get("STREAMFM_TRT_LAYER_INFO_PATH", ""):
+            compile_kwargs["debug"] = True
         build_started_at = time.perf_counter()
 
         # 4) Export before TensorRT compilation: it fixes the 63-state
         # signature and makes every state transition visible to the compiler.
-        if precision == "int8":
+        # A cached engine short-circuits both steps.
+        self.engine_cache_state = "disabled" if not cache.enabled else "miss"
+        self.engine_cache_path = ""
+        cached_metadata: dict[str, Any] = {}
+        if cached_entry is not None:
+            self.engine = cache.load(cached_entry)
+            cached_metadata = cache.read_metadata(cached_entry)
+            self.engine_cache_state = "hit"
+            self.engine_cache_path = str(cached_entry)
+            exported_ops_profile = {"exported_ops_available": False}
+        elif precision == "int8":
             from modelopt.torch.quantization.utils import export_torch_mode
 
             with export_torch_mode():
@@ -310,6 +400,56 @@ class TensorRTStreamingAdapter:
             }
         )
         self.compilation_profile.update(self._dump_layer_info_from_env())
+        self.compilation_profile.update(
+            {
+                "engine_cache_mode": self.engine_cache_mode,
+                "engine_cache_state": self.engine_cache_state,
+                "engine_cache_key": self.engine_cache_key,
+                "engine_cache_path": self.engine_cache_path,
+            }
+        )
+        # A reloaded engine cannot be re-partitioned: its precision layout was
+        # decided at build time and is only recorded in the sidecar.  Republish
+        # that record so a run served from cache still states which layers run
+        # INT8 and which fall back, instead of reporting an empty inventory.
+        cached_profile = cached_metadata.get("compilation_profile", {})
+        if cached_profile:
+            self.compilation_profile.update(
+                {
+                    f"cached_build_{field}": cached_profile.get(field)
+                    for field in (
+                        "tensorrt_partition_count",
+                        "pytorch_fallback_partition_count",
+                        "tensorrt_partitions",
+                        "pytorch_fallback_partitions",
+                        "engine_build_s",
+                        "int8_fallback_dtype",
+                        "io_dtype",
+                    )
+                }
+            )
+        # 5b) Persist a freshly built engine only once its diagnostics exist,
+        # so the stored metadata carries the precision partition this engine
+        # actually uses.  That record is what makes a later latency run and
+        # this build provably the same artifact.
+        if cached_entry is None and cache.may_write and cache_key:
+            stored_entry = cache.store(
+                precision,
+                cache_key,
+                self.engine,
+                config=cache_config,
+                arg_inputs=[x, time_cond, *self._initial_state],
+                extra_metadata={"compilation_profile": self.compilation_profile},
+            )
+            if stored_entry is not None:
+                self.engine_cache_state = "stored"
+                self.engine_cache_path = str(stored_entry)
+                self.compilation_profile.update(
+                    {
+                        "engine_cache_state": self.engine_cache_state,
+                        "engine_cache_path": self.engine_cache_path,
+                    }
+                )
         # ``use_cuda_graph`` deliberately does *not* enable Torch-TensorRT's
         # engine-only CUDA-graph wrapper here.  The benchmark captures a
         # single native CUDA graph around the whole recurrent solver: RI
@@ -340,6 +480,7 @@ class TensorRTStreamingAdapter:
             for item in named_modules
             if "run_on_gpu" in item["name"].lower() or "fallback" in item["type"].lower()
         ]
+        graph_calls = self._graph_tensorrt_calls()
         return {
             "require_full_compilation": (
                 os.environ.get("STREAMFM_TRT_REQUIRE_FULL_COMPILATION", "0") == "1"
@@ -352,7 +493,28 @@ class TensorRTStreamingAdapter:
             "pytorch_fallback_partition_count": len(fallbacks),
             "tensorrt_partitions": lowered,
             "pytorch_fallback_partitions": fallbacks,
+            "tensorrt_graph_call_count": len(graph_calls),
+            "tensorrt_graph_calls": graph_calls,
+            "tensorrt_execution_confirmed": bool(lowered or graph_calls),
         }
+
+    def _graph_tensorrt_calls(self) -> list[dict[str, str]]:
+        """Find TensorRT engine invocations in the FX graph itself.
+
+        A freshly compiled module holds its engine as a submodule, but a module
+        deserialized from an exported program invokes it through a graph node
+        (``tensorrt.execute_engine``) instead.  Walking only ``named_modules``
+        therefore reports zero partitions for a perfectly valid reloaded
+        engine, which would silently look like a total fallback to PyTorch.
+        """
+        graph = getattr(self.engine, "graph", None)
+        calls = []
+        for node in getattr(graph, "nodes", ()):
+            target = getattr(node, "target", None)
+            label = str(getattr(target, "_name", None) or getattr(target, "name", None) or target)
+            if "tensorrt" in label.lower():
+                calls.append({"name": str(getattr(node, "name", "")), "target": label})
+        return calls
 
     def _runtime_engine_modules(self):
         """Return the concrete Torch-TensorRT runtime partitions."""
@@ -642,6 +804,8 @@ def build_tensorrt_streaming_adapter(
     optimization_level: int = 3,
     num_avg_timing_iters: int = 1,
     workspace_size_bytes: int = 0,
+    engine_cache: str = "off",
+    engine_cache_dir=None,
 ):
     """Compile a StreamFM backbone for recurrent, one-frame TensorRT inference."""
     return TensorRTStreamingAdapter(
@@ -656,6 +820,8 @@ def build_tensorrt_streaming_adapter(
         optimization_level=optimization_level,
         num_avg_timing_iters=num_avg_timing_iters,
         workspace_size_bytes=workspace_size_bytes,
+        engine_cache=engine_cache,
+        engine_cache_dir=engine_cache_dir,
     )
 
 
@@ -788,10 +954,13 @@ def benchmark_tensorrt_flow_steps_cuda_graph(
                 for measured_idx, frame_idx in enumerate(range(warmup, total_frames)):
                     with profiler_range.frame(measured_idx):
                         start_event.record()
-                        static_y_frame.copy_(source_frames[frame_idx])
-                        graph.replay()
+                        with profiler_range.section("input_stage"):
+                            static_y_frame.copy_(source_frames[frame_idx])
+                        with profiler_range.section("full_solver_graph_replay"):
+                            graph.replay()
                         end_event.record()
-                        end_event.synchronize()
+                        with profiler_range.section("frame_wait"):
+                            end_event.synchronize()
                         times_ms.append(start_event.elapsed_time(end_event))
                     profiler_range.finish_frame(measured_idx)
             finally:
