@@ -25,6 +25,33 @@ class StreamingSTFTConfig:
     normalized_stft: bool = True  # use "ortho" FFT normalization (matches training)
 
 
+def _float_or_default(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def streaming_config_from_model_cfg(cfg) -> StreamingSTFTConfig:
+    """Build the streaming STFT config from the model's Hydra config.
+
+    Reading n_fft/hop/alpha/beta from the checkpoint's own config keeps the
+    streaming front-end identical to the features the model was trained on
+    (lyra uses a different hop, hence a different frame budget).
+    """
+    feature_cfg = cfg.model.feature_extractor
+    return StreamingSTFTConfig(
+        sample_rate=int(cfg.get("sampling_rate", 16000)),
+        n_fft=int(feature_cfg.get("n_fft", 512)),
+        hop_length=int(feature_cfg.get("hop_length", 256)),
+        alpha=float(feature_cfg.get("alpha", 0.5)),
+        beta=float(feature_cfg.get("beta", 1.0)),
+        cut_highest_freqs=int(feature_cfg.get("cut_highest_freqs", 1)),
+        sigma_y=_float_or_default(cfg.model.get("sigma_y", 0.25), 0.25),
+        normalized_stft=bool(feature_cfg.get("normalized_stft", True)),
+    )
+
+
 def make_synthetic_audio(num_samples: int, sample_rate: int, device: torch.device) -> torch.Tensor:
     """Create mono test audio [1, num_samples]: two tones (220/440 Hz) plus light noise.
 
@@ -58,6 +85,41 @@ def compression_norm(config: StreamingSTFTConfig) -> str | None:
 def frequency_bins(config: StreamingSTFTConfig) -> int:
     """Return the number of model frequency bins after optional high-bin cut."""
     return config.n_fft // 2 + 1 - config.cut_highest_freqs
+
+
+def streaming_algorithmic_delay(config: StreamingSTFTConfig) -> int:
+    """Samples by which the streamed reconstruction lags its input.
+
+    Frame ``f`` analyses input samples ``[(f+1)*hop - n_fft, (f+1)*hop)`` but is
+    written at output offset ``f*hop``, so the reconstruction trails the input by
+    ``n_fft - hop``.  A latency benchmark never has to care; scoring does, since
+    comparing a lagged output against the clean reference misaligns the two
+    signals and collapses SI-SDR in particular.
+    """
+    return config.n_fft - config.hop_length
+
+
+def streaming_num_frames(num_samples: int, config: StreamingSTFTConfig) -> int:
+    """Frames needed to emit at least ``num_samples`` aligned output samples."""
+    # One extra frame beyond ceil(): the delay pushes the last useful samples
+    # past the frame that would suffice if the pipeline were delay-free.
+    span = num_samples + streaming_algorithmic_delay(config)
+    return -(-span // config.hop_length) + 1
+
+
+def compensate_streaming_delay(
+    audio: torch.Tensor, num_samples: int, config: StreamingSTFTConfig
+) -> torch.Tensor:
+    """Trim a streamed reconstruction so sample ``i`` matches input sample ``i``.
+
+    Returned audio is exactly ``num_samples`` long, zero-padded if the run did
+    not produce enough frames to cover the tail.
+    """
+    delay = streaming_algorithmic_delay(config)
+    aligned = audio[:, delay:delay + num_samples]
+    if aligned.shape[-1] < num_samples:
+        aligned = torch.nn.functional.pad(aligned, (0, num_samples - aligned.shape[-1]))
+    return aligned
 
 
 def compress_complex(x: torch.Tensor, config: StreamingSTFTConfig, eps: float = 1e-8) -> torch.Tensor:
