@@ -8,7 +8,7 @@ warm-up.  Per-frame NVTX ranges make the resulting timeline readable.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import os
 
 
@@ -69,11 +69,38 @@ class CudaProfileRange:
             self.torch.cuda.nvtx.range_push(
                 f"streamfm/frame/{self.label}/{measured_index:03d}"
             )
+        record_context = (
+            self.torch.profiler.record_function(
+                f"streamfm/frame/{self.label}/{measured_index:03d}"
+            )
+            if profile_this_frame and self.torch_profiler_active
+            else nullcontext()
+        )
         try:
-            yield
+            with record_context:
+                yield
         finally:
             if profile_this_frame:
                 self.torch.cuda.nvtx.range_pop()
+
+    @contextmanager
+    def section(self, name: str):
+        """Create matching NVTX and torch-profiler ranges for a profiling-only stage."""
+        if not self.active:
+            yield
+            return
+        label = f"streamfm/section/{self.label}/{name}"
+        self.torch.cuda.nvtx.range_push(label)
+        record_context = (
+            self.torch.profiler.record_function(label)
+            if self.torch_profiler_active
+            else nullcontext()
+        )
+        try:
+            with record_context:
+                yield
+        finally:
+            self.torch.cuda.nvtx.range_pop()
 
     def finish_frame(self, measured_index: int) -> None:
         """Advance the torch profiler and shut both profilers down once the frame limit is hit.

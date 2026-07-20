@@ -6,12 +6,32 @@ model: one warmup pass, then timed iterations.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+import os
+from pathlib import Path
 import time
 
 from experiments.core.tensors import empty_model_tensor, format_model_tensor, pack_ri_channels
 from experiments.core.streaming_state import forward_step
 from experiments.core.timing import summarize_ms
 from experiments.core.devices import sync_device
+
+
+_PROFILE_READY_EMITTED = False
+
+
+def _signal_profile_ready() -> None:
+    """Tell an external profiler that warmup is over and measured work starts."""
+    global _PROFILE_READY_EMITTED
+    if _PROFILE_READY_EMITTED:
+        return
+    ready_file = os.environ.get("STREAMFM_PROFILE_READY_FILE", "")
+    if not ready_file:
+        return
+    path = Path(ready_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    _PROFILE_READY_EMITTED = True
 
 
 def benchmark_flow_steps(
@@ -35,6 +55,8 @@ def benchmark_flow_steps(
     """
     import torch
 
+    from experiments.benchmarks.cuda_profile_range import CudaProfileRange
+
     flow = model.eval()
     results = []
 
@@ -49,49 +71,77 @@ def benchmark_flow_steps(
         dnn_input = empty_model_tensor((1, 4, freq_bins, 1), device=device, dtype=dtype, memory_format=model_memory_format)
         x_t_buffer = torch.empty_like(y_frame)
         times_ms = []
+        profiler_backend = (
+            f"tensorrt_{getattr(flow, 'precision', 'unknown')}"
+            if hasattr(flow, "engine")
+            else ("compiled" if use_compiled else "eager")
+        )
+        profiler_range = CudaProfileRange(
+            torch,
+            label=f"{profiler_backend}_{str(dtype).replace('torch.', '')}",
+        )
 
-        with torch.inference_mode():
-            for frame_idx in range(warmup + iterations):
-                # sync before AND after the timed region: GPU calls are
-                # async, without the barriers we'd time queue submission.
-                sync_device(device)
-                start = time.perf_counter()
+        try:
+            with torch.inference_mode():
+                for frame_idx in range(warmup + iterations):
+                    measured_idx = frame_idx - warmup
+                    if measured_idx == 0:
+                        _signal_profile_ready()
+                        profiler_range.start()
+                    frame_context = (
+                        profiler_range.frame(measured_idx)
+                        if measured_idx >= 0
+                        else nullcontext()
+                    )
+                    with frame_context:
+                        # Sync before AND after the timed region: GPU calls are
+                        # async, without the barriers we'd time queue submission.
+                        sync_device(device)
+                        start = time.perf_counter()
 
-                # Euler solver: x_{k+1} = x_k + v(x_k, y, t_k)/steps. Two
-                # equivalent paths — in-place updates on preallocated buffers
-                # (no per-frame allocation) vs fresh tensors each step — to
-                # measure whether allocator traffic matters on this device.
-                if preallocate_model_buffers:
-                    x_t_buffer.copy_(y_frame)
-                    for step_idx in range(steps):
-                        pack_ri_channels(x_t_buffer, y_frame, out=dnn_input)  # [1, 4, F, 1] = (x_t, y)
-                        v, flow_states[step_idx] = forward_step(
-                            flow,
-                            dnn_input,
-                            state=flow_states[step_idx],
-                            time_cond=t_tensors[step_idx],
-                            use_compiled=use_compiled,
-                        )
-                        x_t_buffer.add_(v, alpha=1.0 / steps)
-                else:
-                    x_t = y_frame
-                    for step_idx in range(steps):
-                        t = torch.full((1,), step_idx / max(steps, 1), device=device, dtype=dtype)
-                        dnn_input_dynamic = pack_ri_channels(x_t, y_frame, memory_format=model_memory_format)
-                        v, flow_states[step_idx] = forward_step(
-                            flow,
-                            dnn_input_dynamic,
-                            state=flow_states[step_idx],
-                            time_cond=t,
-                            use_compiled=use_compiled,
-                        )
-                        x_t = x_t + v / steps
+                        # Euler solver: x_{k+1} = x_k + v(x_k, y, t_k)/steps.
+                        if preallocate_model_buffers:
+                            with profiler_range.section("input_stage"):
+                                x_t_buffer.copy_(y_frame)
+                            for step_idx in range(steps):
+                                with profiler_range.section("ri_packing"):
+                                    pack_ri_channels(x_t_buffer, y_frame, out=dnn_input)
+                                with profiler_range.section("backbone_or_engine"):
+                                    v, flow_states[step_idx] = forward_step(
+                                        flow,
+                                        dnn_input,
+                                        state=flow_states[step_idx],
+                                        time_cond=t_tensors[step_idx],
+                                        use_compiled=use_compiled,
+                                    )
+                                with profiler_range.section("euler_update"):
+                                    x_t_buffer.add_(v, alpha=1.0 / steps)
+                        else:
+                            x_t = y_frame
+                            for step_idx in range(steps):
+                                t = torch.full((1,), step_idx / max(steps, 1), device=device, dtype=dtype)
+                                with profiler_range.section("ri_packing"):
+                                    dnn_input_dynamic = pack_ri_channels(
+                                        x_t, y_frame, memory_format=model_memory_format
+                                    )
+                                with profiler_range.section("backbone_or_engine"):
+                                    v, flow_states[step_idx] = forward_step(
+                                        flow,
+                                        dnn_input_dynamic,
+                                        state=flow_states[step_idx],
+                                        time_cond=t,
+                                        use_compiled=use_compiled,
+                                    )
+                                with profiler_range.section("euler_update"):
+                                    x_t = x_t + v / steps
 
-                sync_device(device)
-                # Warmup frames run the same code but are discarded (lazy
-                # init, cache warming, torch.compile happen there).
-                if frame_idx >= warmup:
-                    times_ms.append((time.perf_counter() - start) * 1000.0)
+                        sync_device(device)
+                        if measured_idx >= 0:
+                            times_ms.append((time.perf_counter() - start) * 1000.0)
+                    if measured_idx >= 0:
+                        profiler_range.finish_frame(measured_idx)
+        finally:
+            profiler_range.close()
 
         summary = summarize_ms(times_ms)
         summary.update(
@@ -137,6 +187,8 @@ def benchmark_se_predictor(
 
     with torch.inference_mode():
         for frame_idx in range(warmup + iterations):
+            if frame_idx == warmup:
+                _signal_profile_ready()
             y_frame = format_model_tensor(source_y_frames[frame_idx], model_memory_format)
             sync_device(device)
             start = time.perf_counter()
@@ -207,6 +259,8 @@ def benchmark_se_flow(
 
         with torch.inference_mode():
             for frame_idx in range(total_frames):
+                if frame_idx == warmup:
+                    _signal_profile_ready()
                 e_frame = format_model_tensor(source_e_frames[frame_idx], model_memory_format)
                 y_frame = format_model_tensor(source_y_frames[frame_idx], model_memory_format)
                 noise_frame = format_model_tensor(source_noise_frames[frame_idx], model_memory_format)
@@ -306,6 +360,8 @@ def benchmark_se_full(
 
         with torch.inference_mode():
             for frame_idx in range(total_frames):
+                if frame_idx == warmup:
+                    _signal_profile_ready()
                 y_frame = format_model_tensor(source_y_frames[frame_idx], model_memory_format)
                 noise_frame = format_model_tensor(source_noise_frames[frame_idx], model_memory_format)
 

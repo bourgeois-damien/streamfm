@@ -114,10 +114,13 @@ def benchmark_flow_steps_cuda_graph(
                 for measured_idx, frame_idx in enumerate(range(warmup, warmup + iterations)):
                     with profiler_range.frame(measured_idx):
                         start_event.record()
-                        static_y_frame.copy_(source_frames[frame_idx])
-                        graph.replay()
+                        with profiler_range.section("input_stage"):
+                            static_y_frame.copy_(source_frames[frame_idx])
+                        with profiler_range.section("full_solver_graph_replay"):
+                            graph.replay()
                         end_event.record()
-                        end_event.synchronize()
+                        with profiler_range.section("frame_wait"):
+                            end_event.synchronize()
                         times_ms.append(start_event.elapsed_time(end_event))
                     profiler_range.finish_frame(measured_idx)
             finally:
