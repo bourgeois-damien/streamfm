@@ -59,6 +59,7 @@ def compress_checkpoint(
     output_checkpoint: str | Path,
     rank: int,
     backbone_paths: tuple[str, ...] = ("dnn",),
+    module_names: tuple[str, ...] | None = None,
     config_dir: str | Path = "config",
     overwrite: bool = False,
 ) -> dict:
@@ -94,7 +95,16 @@ def compress_checkpoint(
             if key.startswith(f"{prefix}.")
         }
         backbone.load_state_dict(backbone_state, strict=True)
-        compress_decoupled_(backbone, rank)
+        selected = set(module_names) if module_names is not None else None
+        compress_decoupled_(
+            backbone,
+            rank,
+            module_filter=(
+                (lambda name, _module: name in selected)
+                if selected is not None
+                else (lambda *_: True)
+            ),
+        )
         for key in backbone_state:
             compressed_state.pop(f"{prefix}.{key}")
         compressed_state.update({f"{prefix}.{key}": value for key, value in backbone.state_dict().items()})
@@ -103,7 +113,11 @@ def compress_checkpoint(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output = {
         "state_dict": compressed_state,
-        COMPRESSION_METADATA_KEY: make_decoupled_svd_metadata(rank=rank, backbone_paths=list(paths)),
+        COMPRESSION_METADATA_KEY: make_decoupled_svd_metadata(
+            rank=rank,
+            backbone_paths=list(paths),
+            module_names=module_names,
+        ),
         "source_checkpoint": str(source_path),
     }
     torch.save(output, output_path)
@@ -111,6 +125,7 @@ def compress_checkpoint(
         "output_checkpoint": str(output_path),
         "rank": rank,
         "backbone_paths": list(paths),
+        "module_names": list(module_names) if module_names is not None else None,
         "parameters": parameter_count,
     }
 
@@ -127,6 +142,15 @@ def main() -> None:
         default=[],
         help="Model module to compress; repeat if needed. Defaults to dnn.",
     )
+    parser.add_argument(
+        "--module",
+        action="append",
+        default=[],
+        help=(
+            "Compress only this module path relative to each backbone; repeat as needed. "
+            "Defaults to every eligible convolution."
+        ),
+    )
     parser.add_argument("--config-dir", default="config")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -136,6 +160,7 @@ def main() -> None:
         output_checkpoint=args.output,
         rank=args.rank,
         backbone_paths=tuple(args.backbone_path or ["dnn"]),
+        module_names=tuple(args.module) if args.module else None,
         config_dir=args.config_dir,
         overwrite=args.overwrite,
     )
