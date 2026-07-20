@@ -36,8 +36,8 @@ def normalize_cli_options(
         raise ValueError("Unsupported part. Use 'model', 'predictor', or 'flow'.")
     if requested_pipeline not in {"model_only", "audio"}:
         raise ValueError("Unsupported pipeline. Use 'model_only' or 'audio'.")
-    if requested_execution not in {"eager", "compiled", "cuda_graph", "tensorrt", "tensorrt_cuda_graph"}:
-        raise ValueError("Unsupported execution. Use eager, compiled, cuda_graph, tensorrt, or tensorrt_cuda_graph.")
+    if requested_execution not in {"eager", "compiled", "cuda_graph", "cuda_graph_full", "tensorrt", "tensorrt_cuda_graph"}:
+        raise ValueError("Unsupported execution. Use eager, compiled, cuda_graph, cuda_graph_full, tensorrt, or tensorrt_cuda_graph.")
 
     # Flow-only tasks (stftpr/bwe/...) have a single DNN, so part=model and
     # part=flow are the same thing; only SE splits into predictor + flow.
@@ -52,12 +52,26 @@ def normalize_cli_options(
     else:
         internal_task = "se_full"
 
+    if requested_execution == "cuda_graph_full":
+        # The fused graph captures the STFT audio path (STFT + compression +
+        # solver + ISTFT), so it only makes sense on the audio pipeline, and
+        # only for flow tasks (SE would need its own predictor-in-graph variant).
+        if requested_pipeline != "audio":
+            raise ValueError("Execution 'cuda_graph_full' captures the STFT audio path; use '--pipeline audio'.")
+        if requested_task == "se":
+            raise ValueError("Execution 'cuda_graph_full' is not implemented for SE; use a flow task or '--execution cuda_graph'.")
+
     if requested_pipeline == "model_only":
         internal_pipeline = "graph_model" if requested_execution == "cuda_graph" else "model"
     else:
         if requested_task == "se" and requested_part != "model":
             raise ValueError("SE audio pipeline supports only '--part model'. Use '--pipeline model_only' for predictor/flow.")
-        internal_pipeline = "audio_graph_model" if requested_execution == "cuda_graph" else "audio"
+        if requested_execution == "cuda_graph_full":
+            internal_pipeline = "audio_full_graph"
+        elif requested_execution == "cuda_graph":
+            internal_pipeline = "audio_graph_model"
+        else:
+            internal_pipeline = "audio"
 
     return {
         "requested_task": requested_task,
@@ -66,7 +80,7 @@ def normalize_cli_options(
         "execution": requested_execution,
         "internal_task": internal_task,
         "internal_pipeline": internal_pipeline,
-        "use_compiled": requested_execution in {"compiled", "cuda_graph"},
+        "use_compiled": requested_execution in {"compiled", "cuda_graph", "cuda_graph_full"},
         "use_tensorrt": requested_execution in {"tensorrt", "tensorrt_cuda_graph"},
         "tensorrt_cuda_graph": requested_execution == "tensorrt_cuda_graph",
     }

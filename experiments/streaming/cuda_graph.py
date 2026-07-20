@@ -246,6 +246,220 @@ def run_streaming_audio_pipeline_with_cuda_graph_model(
     return summary
 
 
+def run_streaming_audio_pipeline_with_full_cuda_graph(
+    flow,
+    audio: torch.Tensor,
+    device: torch.device,
+    steps: int = 1,
+    iterations: int = 100,
+    warmup: int = 10,
+    use_compiled: bool = True,
+    config: StreamingSTFTConfig = StreamingSTFTConfig(),
+    seed: int = 0,
+    model_dtype: torch.dtype = torch.float32,
+    model_memory_format: str = "contiguous",
+    return_audio: bool = False,
+) -> dict:
+    """Streaming pipeline with STFT, compression, solver AND ISTFT in one CUDA Graph.
+
+    Unlike run_streaming_audio_pipeline_with_cuda_graph_model — which captures
+    only the flow solver and leaves the STFT/ISTFT and magnitude
+    compression/decompression running eagerly, each fenced by a full device
+    sync — this variant folds the entire per-frame computation into a single
+    captured graph. Per frame, only two host->device copies happen before the
+    replay (the sliding input frame and the pre-generated noise) and one
+    overlap-add happens after it (its write offset moves every frame, so it
+    cannot live in the graph). That collapses the ~four syncs/frame of the
+    model-only graph into one launch + one sync, removing the launch/sync
+    overhead that dominates the tiny FFT and compression stages at NFE=1.
+
+    Shapes stay static because n_fft/hop_length are fixed and the
+    cut_highest_freqs re-padding is a constant-size cat, so rfft/irfft and the
+    compression ops are all safe to capture once their cuFFT plans are warmed.
+    Reports only the fused total (no per-stage breakdown — the point of this
+    mode is that the stages are no longer separable).
+    """
+    assert device.type == "cuda", "CUDA Graph requires a CUDA device."
+    assert audio.ndim == 2 and audio.shape[0] == 1, "Expected mono audio shaped [1, T]."
+    assert steps > 0
+
+    torch.manual_seed(seed)
+    flow = flow.eval().to(dtype=model_dtype)
+    audio = audio.to(device)
+    window = sqrt_hann_window(config, device)
+    norm = compression_norm(config)
+
+    total_frames = warmup + iterations
+    required_samples = total_frames * config.hop_length
+    if audio.shape[-1] < required_samples:
+        audio = torch.nn.functional.pad(audio, (0, required_samples - audio.shape[-1]))
+
+    # Fixed-address graph I/O. Inputs written each frame: the raw n_fft-sample
+    # input frame (windowing happens inside the graph) and the noise. Output:
+    # the reconstructed n_fft-sample frame, read out after replay for
+    # overlap-add. static_x_t/dnn_input/output are solver scratch as usual.
+    freq_bins = frequency_bins(config)
+    static_input_buffer = torch.zeros(1, config.n_fft, device=device)
+    static_noise_frame = empty_model_tensor((1, 2, freq_bins, 1), device=device, dtype=model_dtype, memory_format=model_memory_format)
+    static_output = torch.empty_like(static_noise_frame)
+    static_x_t = torch.empty_like(static_noise_frame)
+    static_dnn_input = empty_model_tensor((1, 4, freq_bins, 1), device=device, dtype=model_dtype, memory_format=model_memory_format)
+    static_frame_audio = torch.zeros(1, config.n_fft, device=device)
+    noise_frames = torch.randn(total_frames, *static_noise_frame.shape, device=device, dtype=model_dtype)
+    t_tensors = [
+        torch.full((1,), step_idx / max(steps, 1), device=device, dtype=model_dtype)
+        for step_idx in range(steps)
+    ]
+    flow_states = [prepare_streaming_state(flow) for _ in range(steps)]
+
+    def analysis(input_frame: torch.Tensor) -> torch.Tensor:
+        """STFT + magnitude compression -> model-layout conditioning frame [1, 2, F, 1]."""
+        spectrum = torch.fft.rfft(input_frame * window, n=config.n_fft, norm=norm)
+        if config.cut_highest_freqs:
+            spectrum = spectrum[:, :-config.cut_highest_freqs]
+        y_complex = compress_complex(spectrum, config)
+        y_condition = y_complex.abs().to(y_complex.dtype)
+        y_frame = complex_to_ri_frame(y_condition)
+        return format_model_tensor(y_frame.to(model_dtype), model_memory_format)
+
+    def synthesis(x_ri: torch.Tensor) -> torch.Tensor:
+        """Decompression + ISTFT of the solver output -> windowed n_fft frame [1, n_fft]."""
+        x_complex = ri_frame_to_complex(x_ri.float())
+        x_complex = decompress_complex(x_complex, config)
+        x_complex = pad_cut_highest_freqs(x_complex, config)
+        return torch.fft.irfft(x_complex, n=config.n_fft, norm=norm) * window
+
+    def run_solver_with_states(
+        y_frame: torch.Tensor,
+        noise_frame: torch.Tensor,
+        states: list,
+    ) -> torch.Tensor:
+        """Advance the flow solver for one frame using the static scratch buffers."""
+        static_x_t.copy_(y_frame)
+        static_x_t.add_(noise_frame, alpha=config.sigma_y)
+        for step_idx in range(steps):
+            pack_ri_channels(static_x_t, y_frame, out=static_dnn_input)
+            v, states[step_idx] = forward_step(
+                flow,
+                static_dnn_input,
+                state=states[step_idx],
+                time_cond=t_tensors[step_idx],
+                use_compiled=use_compiled,
+            )
+            static_x_t.add_(v, alpha=1.0 / steps)
+        return static_x_t
+
+    def full_forward(states: list) -> None:
+        """The whole per-frame path, writing into static_output/static_frame_audio."""
+        y_frame = analysis(static_input_buffer)
+        x_ri = run_solver_with_states(y_frame, static_noise_frame, states)
+        static_output.copy_(x_ri)
+        static_frame_audio.copy_(synthesis(static_output))
+
+    input_buffer = torch.zeros(1, config.n_fft, device=device)
+    output = torch.zeros(1, required_samples + config.n_fft, device=device)
+    denom = torch.zeros_like(output)
+    window_sq = window.square()
+
+    total_times: list[float] = []
+
+    with torch.inference_mode():
+        # 1) Warmup BEFORE capture over the WHOLE fused path so the cuFFT plans
+        # (rfft and irfft), cuDNN autotuning and lazy allocations all happen
+        # now — not just the solver's, as in the model-only graph.
+        static_input_buffer.normal_()
+        static_noise_frame.normal_()
+        for _ in range(3):
+            full_forward(flow_states)
+        torch.cuda.synchronize()
+        for state in flow_states:
+            zero_streaming_state(flow, state)
+
+        # 2) Capture the fused STFT -> compress -> solver -> decompress -> ISTFT.
+        graph = torch.cuda.CUDAGraph()
+        torch.cuda.synchronize()
+        with torch.cuda.graph(graph):
+            full_forward(flow_states)
+
+        # 3) Sanity check: replay vs an eager full-forward on identical input
+        # and freshly zeroed states. The diff (on the reconstructed audio frame,
+        # end to end) goes into the summary so a corrupt capture surfaces in the
+        # results instead of as silently-wrong audio.
+        check_input = torch.randn_like(static_input_buffer)
+        check_noise = torch.randn_like(static_noise_frame)
+        eager_states = [prepare_streaming_state(flow) for _ in range(steps)]
+        for state in flow_states:
+            zero_streaming_state(flow, state)
+        for state in eager_states:
+            zero_streaming_state(flow, state)
+        static_input_buffer.copy_(check_input)
+        static_noise_frame.copy_(check_noise)
+        graph.replay()
+        torch.cuda.synchronize()
+        graph_check_audio = static_frame_audio.float().detach().clone()
+        eager_y = analysis(check_input)
+        eager_x = run_solver_with_states(eager_y, check_noise, eager_states)
+        eager_audio = synthesis(eager_x).float()
+        torch.cuda.synchronize()
+        graph_eager_abs_diff = (graph_check_audio - eager_audio).abs()
+        graph_eager_max_abs_diff = float(graph_eager_abs_diff.max().item())
+        graph_eager_mean_abs_diff = float(graph_eager_abs_diff.mean().item())
+        graph_eager_ref_mean_abs = float(eager_audio.abs().mean().item())
+        for state in flow_states:
+            zero_streaming_state(flow, state)
+
+        # 4) Frame loop: shift the input frame, stage the two inputs, one
+        # replay, overlap-add — one launch + one sync per frame.
+        for frame_idx in range(total_frames):
+            chunk_start = frame_idx * config.hop_length
+            chunk = audio[:, chunk_start:chunk_start + config.hop_length]
+            input_buffer = torch.cat([input_buffer[:, config.hop_length:], chunk], dim=-1)
+
+            sync_device(device)
+            total_start = time.perf_counter()
+
+            static_input_buffer.copy_(input_buffer)
+            static_noise_frame.copy_(noise_frames[frame_idx])
+            graph.replay()
+            out_start = frame_idx * config.hop_length
+            output[:, out_start:out_start + config.n_fft] += static_frame_audio
+            denom[:, out_start:out_start + config.n_fft] += window_sq
+            sync_device(device)
+            total_ms = (time.perf_counter() - total_start) * 1000.0
+
+            if frame_idx >= warmup:
+                total_times.append(total_ms)
+
+    output = output[:, :required_samples]
+    denom = denom[:, :required_samples].clamp_min(1e-8)
+    output = output / denom
+
+    summary = {
+        "mode": "streaming_audio_pipeline_full_cuda_graph",
+        "steps": steps,
+        "iterations": iterations,
+        "warmup": warmup,
+        "compiled": use_compiled,
+        "cuda_graph": True,
+        "cuda_graph_model": True,
+        "cuda_graph_full": True,
+        "cuda_graph_scope": "stft_solver_istft",
+        "model_dtype": str(model_dtype).replace("torch.", ""),
+        "model_memory_format": model_memory_format,
+        "pre_generated_noise": True,
+        "graph_eager_max_abs_diff": graph_eager_max_abs_diff,
+        "graph_eager_mean_abs_diff": graph_eager_mean_abs_diff,
+        "graph_eager_ref_mean_abs": graph_eager_ref_mean_abs,
+        "frame_budget_ms": 1000.0 * config.hop_length / config.sample_rate,
+        "audio_sample_rate": config.sample_rate,
+    }
+    summary.update(summarize_prefixed_ms(total_times, "total"))
+    summary["budget_ratio_mean"] = summary["total_mean_ms"] / summary["frame_budget_ms"]
+    if return_audio:
+        summary["audio"] = output.detach().cpu()
+    return summary
+
+
 def run_streaming_audio_pipeline_with_tensorrt_cuda_graph(
     flow,
     audio: torch.Tensor,
