@@ -214,9 +214,14 @@ def log_batch_trials_to_wandb(
     input_audio_path: str,
     history_json: str = "",
     backend: str = "modal",
+    wandb_enabled: bool = True,
 ) -> int:
     """Create one W&B run per batch trial and return the number of runs logged."""
-    import wandb
+    wandb = None
+    if wandb_enabled:
+        import wandb as wandb_module
+
+        wandb = wandb_module
 
     logged_runs = 0
     total = len(batch_outputs)
@@ -246,20 +251,24 @@ def log_batch_trials_to_wandb(
         if group:
             init_kwargs["group"] = group
 
-        print(
-            f"Logging W&B run {logged_runs + 1}/{total} "
-            f"({command.get('execution')}, {command.get('model_dtype')}, "
-            f"{command.get('memory_format')}) → project={project}",
-            flush=True,
-        )
-        wandb.init(**init_kwargs)
-        try:
-            log_sweep_results_to_run(
-                results=results,
-                command=command,
-                run_id=run_id,
-                run_started_at=run_started_at,
+        if wandb_enabled:
+            print(
+                f"Logging W&B run {logged_runs + 1}/{total} "
+                f"({command.get('execution')}, {command.get('model_dtype')}, "
+                f"{command.get('memory_format')}) → project={project}",
+                flush=True,
             )
+            assert wandb is not None
+            wandb.init(**init_kwargs)
+        try:
+            if wandb_enabled:
+                assert wandb is not None
+                log_sweep_results_to_run(
+                    results=results,
+                    command=command,
+                    run_id=run_id,
+                    run_started_at=run_started_at,
+                )
             record_benchmark_results(
                 results=results,
                 command=command,
@@ -268,7 +277,9 @@ def log_batch_trials_to_wandb(
             )
             logged_runs += 1
         finally:
-            wandb.finish()
+            if wandb_enabled:
+                assert wandb is not None
+                wandb.finish()
     return logged_runs
 
 
@@ -282,6 +293,7 @@ def run_sweep_batch(
     workers: int = 1,
     dry_run: bool = False,
     assume_yes: bool = False,
+    wandb_enabled: bool = True,
 ) -> tuple[int, int]:
     """Expand a sweep YAML grid, run it locally or on Modal, and log to W&B."""
     # 1) Expand the grid and validate the backend.
@@ -386,9 +398,11 @@ def run_sweep_batch(
             input_audio_path=input_audio_path,
             history_json=history_json,
             backend=backend,
+            wandb_enabled=wandb_enabled,
         )
 
-    print(f"Logged {logged_runs} W&B run(s) from {total_trials} batch trial(s).")
+    action = "Logged to W&B" if wandb_enabled else "Recorded locally"
+    print(f"{action}: {logged_runs}/{total_trials} batch trial(s).")
     return len(grouped), logged_runs
 
 
@@ -414,6 +428,11 @@ def main() -> None:
         help="Skip the confirmation prompt for >4 parallel GPU workers.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the batch plan without launching compute.")
+    parser.add_argument(
+        "--skip-wandb",
+        action="store_true",
+        help="Write local history files without importing or logging to W&B.",
+    )
     args = parser.parse_args()
 
     metadata = load_sweep_metadata(args.sweep_yaml)
@@ -429,6 +448,7 @@ def main() -> None:
         workers=args.workers,
         dry_run=args.dry_run,
         assume_yes=args.yes,
+        wandb_enabled=not args.skip_wandb,
     )
 
 

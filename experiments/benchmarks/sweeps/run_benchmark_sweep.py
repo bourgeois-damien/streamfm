@@ -117,11 +117,21 @@ def build_sweep_command(
         "warmup": int(sweep_config_get(config, "warmup", 10)),
         "audio_duration_s": float(sweep_config_get(config, "audio_duration_s", 0.0)),
         "model_dtype": str(sweep_config_get(config, "dtype", "fp32")),
+        "checkpoint_name": str(
+            sweep_config_get(
+                config,
+                "ckpt",
+                sweep_config_get(config, "checkpoint_name", ""),
+            )
+        ),
         "matmul_precision": str(sweep_config_get(config, "matmul_precision", "high")),
         "tf32": str(sweep_config_get(config, "tf32", "auto")),
+        "cudnn_benchmark": bool(sweep_config_get(config, "cudnn_benchmark", False)),
+        "cudnn_benchmark_limit": int(sweep_config_get(config, "cudnn_benchmark_limit", 10)),
         "trt_optimization_level": int(sweep_config_get(config, "trt_optimization_level", 3)),
         "trt_avg_timing_iters": int(sweep_config_get(config, "trt_avg_timing_iters", 1)),
         "trt_workspace_size_mib": int(sweep_config_get(config, "trt_workspace_size_mib", 0)),
+        "trt_engine_cache": str(sweep_config_get(config, "trt_engine_cache", "off")),
         "num_threads": int(sweep_config_get(config, "num_threads", 0)),
         "num_interop_threads": int(sweep_config_get(config, "num_interop_threads", 0)),
         "memory_format": str(sweep_config_get(config, "memory_format", "contiguous")),
@@ -218,9 +228,12 @@ def _run_benchmark_local(command: dict[str, Any], *, input_audio_path: str) -> l
         model_dtype_name=str(command["model_dtype"]),
         float32_matmul_precision=str(command["matmul_precision"]),
         tf32_mode=str(command.get("tf32", "auto")),
+        cudnn_benchmark=bool(command.get("cudnn_benchmark", False)),
+        cudnn_benchmark_limit=int(command.get("cudnn_benchmark_limit", 10)),
         tensorrt_optimization_level=int(command.get("trt_optimization_level", 3)),
         tensorrt_num_avg_timing_iters=int(command.get("trt_avg_timing_iters", 1)),
         tensorrt_workspace_size_mib=int(command.get("trt_workspace_size_mib", 0)),
+        tensorrt_engine_cache=str(command.get("trt_engine_cache", "off")),
         device=device,
         paths=paths,
         backend="local",
@@ -234,6 +247,7 @@ def _run_benchmark_local(command: dict[str, Any], *, input_audio_path: str) -> l
         profile=bool(command["profile"]),
         profile_all=bool(command["profile_all"]),
         profile_file=str(command["profile_file"]),
+        checkpoint_name=str(command.get("checkpoint_name", "")),
         ptq_int8=str(command.get("ptq_int8", "")),
         ptq_calib_steps=int(command.get("ptq_calib_steps", 32)),
     )
@@ -279,6 +293,8 @@ def _run_benchmark_modal(command: dict[str, Any], *, input_audio_path: str, outp
         str(command.get("trt_avg_timing_iters", 1)),
         "--trt-workspace-size-mib",
         str(command.get("trt_workspace_size_mib", 0)),
+        "--trt-engine-cache",
+        str(command.get("trt_engine_cache", "off")),
         "--audio-duration-s",
         str(command["audio_duration_s"]),
         "--output-json",
@@ -290,8 +306,15 @@ def _run_benchmark_modal(command: dict[str, Any], *, input_audio_path: str, outp
         modal_command.extend(["--num-interop-threads", str(command["num_interop_threads"])])
     if str(command["memory_format"]) != "contiguous":
         modal_command.extend(["--memory-format", str(command["memory_format"])])
+    if str(command.get("checkpoint_name", "")):
+        modal_command.extend(["--ckpt", str(command["checkpoint_name"])])
     if bool(command["preallocate_model_buffers"]):
         modal_command.append("--preallocate-model-buffers")
+    if bool(command.get("cudnn_benchmark", False)):
+        modal_command.append("--cudnn-benchmark")
+        modal_command.extend(
+            ["--cudnn-benchmark-limit", str(command.get("cudnn_benchmark_limit", 10))]
+        )
     if str(command.get("ptq_int8", "")):
         modal_command.extend(["--ptq-int8", str(command["ptq_int8"])])
         modal_command.extend(["--ptq-calib-steps", str(int(command.get("ptq_calib_steps", 32)))])
