@@ -1,0 +1,58 @@
+# Repeated validation of the two useful L40S real-time boundaries:
+# - NFE 20/21 for the direct 16 ms frame budget;
+# - NFE 18/19 for the conservative 14.4 ms (10% headroom) budget.
+#
+# cuDNN autotuning is disabled because its small discovery gain was not
+# reproduced by the long NFE=1 validation. This keeps the final NFE claim tied
+# to the stable FP16/channels_last/full-CUDA-Graph reference configuration.
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L40S
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: cuda_graph_full
+  steps:
+    values:
+      - 18
+      - 19
+      - 20
+      - 21
+  repeat_index:
+    values:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+  dtype:
+    value: fp16
+  memory_format:
+    value: channels_last
+  matmul_precision:
+    value: high
+  tf32:
+    value: auto
+  cudnn_benchmark:
+    value: false
+  preallocate_model_buffers:
+    value: false
+  iterations:
+    value: 500
+  warmup:
+    value: 100
+  ckpt:
+    value: ""
+
+exclude: []

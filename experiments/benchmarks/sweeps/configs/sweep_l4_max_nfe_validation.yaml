@@ -1,0 +1,56 @@
+# Final validation around the real-time NFE boundary found by the discovery
+# sweep. Five repeat_index values deliberately create independent repeated
+# captures/measurements for each NFE while keeping one physical L4.
+#
+# Launch with `--workers 1`.
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: cuda_graph_full
+  steps:
+    values:
+      - 14
+      - 15
+      - 16
+      - 17
+  repeat_index:
+    values:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+  dtype:
+    value: fp16
+  memory_format:
+    value: channels_last
+  matmul_precision:
+    value: high
+  tf32:
+    value: auto
+  cudnn_benchmark:
+    value: false
+  preallocate_model_buffers:
+    value: false
+  iterations:
+    value: 500
+  warmup:
+    value: 100
+  ckpt:
+    value: ""
+
+exclude: []

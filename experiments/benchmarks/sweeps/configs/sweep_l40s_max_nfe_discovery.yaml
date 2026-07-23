@@ -1,0 +1,56 @@
+# Discovery sweep for the largest directly measured real-time NFE on L40S.
+#
+# The runtime configuration is the best FP16 candidate from the L40S tuning
+# pass: full STFT/solver/ISTFT CUDA Graph, channels_last and cuDNN autotuning.
+# Trials stay in one Modal container so the physical GPU and compiler cache are
+# shared. A separate repeated validation sweep will be created around the
+# measured 16 ms P99 boundary.
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L40S
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: cuda_graph_full
+  steps:
+    values:
+      - 16
+      - 20
+      - 22
+      - 23
+      - 24
+      - 25
+      - 26
+  dtype:
+    value: fp16
+  memory_format:
+    value: channels_last
+  matmul_precision:
+    value: high
+  tf32:
+    value: auto
+  cudnn_benchmark:
+    value: true
+  cudnn_benchmark_limit:
+    value: 10
+  preallocate_model_buffers:
+    value: false
+  iterations:
+    value: 200
+  warmup:
+    value: 50
+  ckpt:
+    value: ""
+
+exclude: []

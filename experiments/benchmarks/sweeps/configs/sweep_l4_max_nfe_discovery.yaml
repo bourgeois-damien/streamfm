@@ -1,0 +1,60 @@
+# Discovery sweep for the largest directly measured real-time NFE on L4.
+#
+# Keep all trials in one Modal container (`--workers 1`) so they run on the
+# same physical L4. This first pass brackets the 16 ms P99 threshold; the
+# boundary points will be repeated later with the final 500-1000 iteration
+# protocol.
+#
+# Launch:
+#   .venv/bin/python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
+#     --sweep-yaml experiments/benchmarks/sweeps/configs/sweep_l4_max_nfe_discovery.yaml \
+#     --history-json outputs/final_runs/max_nfe_l4_discovery_history.json \
+#     --workers 1 --skip-wandb
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    value: cuda_graph_full
+  steps:
+    values:
+      - 5
+      - 8
+      - 10
+      - 12
+      - 14
+      - 15
+      - 16
+      - 17
+  dtype:
+    value: fp16
+  memory_format:
+    value: channels_last
+  matmul_precision:
+    value: high
+  tf32:
+    value: auto
+  cudnn_benchmark:
+    value: false
+  preallocate_model_buffers:
+    value: false
+  iterations:
+    value: 200
+  warmup:
+    value: 50
+  ckpt:
+    value: ""
+
+exclude: []

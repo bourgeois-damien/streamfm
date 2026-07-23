@@ -1,0 +1,85 @@
+# Final homogeneous L4 waterfall for the dissertation.
+#
+# Six cumulative operating points, five repetitions each, in one Modal L4
+# container (`--workers 1`). All runs use the same STFTPR checkpoint, NFE=1,
+# audio pipeline, input, warm-up and measured-frame count.
+
+program: experiments/benchmarks/sweeps/run_benchmark_sweep.py
+project: streamfm-benchmark-sweeps
+entity: damien-brgs92-heriot-watt-university
+method: grid
+parameters:
+  backend:
+    value: modal
+  hardware:
+    value: L4
+  task:
+    value: stftpr
+  part:
+    value: model
+  pipeline:
+    value: audio
+  execution:
+    values:
+      - eager
+      - compiled
+      - cuda_graph
+      - cuda_graph_full
+  steps:
+    value: 1
+  dtype:
+    values:
+      - fp32
+      - fp16
+  memory_format:
+    values:
+      - contiguous
+      - channels_last
+  repeat_index:
+    values:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+  matmul_precision:
+    value: high
+  tf32:
+    value: auto
+  cudnn_benchmark:
+    value: false
+  preallocate_model_buffers:
+    value: false
+  iterations:
+    value: 500
+  warmup:
+    value: 100
+  ckpt:
+    value: ""
+
+# Retain only:
+#   eager/fp32/contiguous
+#   eager/fp16/contiguous
+#   compiled/fp16/contiguous
+#   compiled/fp16/channels_last
+#   cuda_graph/fp16/channels_last
+#   cuda_graph_full/fp16/channels_last
+exclude:
+  - execution: eager
+    dtype: fp32
+    memory_format: channels_last
+  - execution: eager
+    dtype: fp16
+    memory_format: channels_last
+  - execution: compiled
+    dtype: fp32
+  - execution: cuda_graph
+    dtype: fp32
+  - execution: cuda_graph
+    dtype: fp16
+    memory_format: contiguous
+  - execution: cuda_graph_full
+    dtype: fp32
+  - execution: cuda_graph_full
+    dtype: fp16
+    memory_format: contiguous
