@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 from experiments.core.tensors import apply_model_memory_format, normalize_model_memory_format
 from experiments.core.devices import (
@@ -123,8 +124,13 @@ def _frame_budget_ms_from_config(config) -> float:
 
 
 def _load_input_audio(input_audio_path: str, *, config, device):
-    """Load an optional real audio file for audio-pipeline benchmarks."""
-    if not input_audio_path:
+    """Load an optional real audio file for audio-pipeline benchmarks.
+
+    Returns None when no path was given or the file is absent, in which case
+    the caller falls back to synthetic audio. No clip ships with the repo, so a
+    fresh checkout takes that path by default.
+    """
+    if not input_audio_path or not Path(input_audio_path).is_file():
         return None
 
     import torch

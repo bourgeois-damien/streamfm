@@ -23,7 +23,7 @@ from experiments.core.paths import make_benchmark_paths
 from experiments.benchmarks.results import DEFAULT_WANDB_PROJECT, record_benchmark_results
 from experiments.benchmarks.runner import run_benchmark
 
-DEFAULT_INPUT_AUDIO = "inputs/test_clips/audio_43m28_10s.wav"
+DEFAULT_INPUT_AUDIO = "inputs/test_clips/benchmark_input_10s.wav"
 
 
 def _safe_name(value: str) -> str:
@@ -325,7 +325,11 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--input-audio",
         default=DEFAULT_INPUT_AUDIO,
-        help="Optional real audio file for --pipeline audio. Defaults to inputs/test_clips/audio_43m28_10s.wav if present.",
+        help=(
+            "Optional real audio file for --pipeline audio. Defaults to "
+            "inputs/test_clips/benchmark_input_10s.wav if you put a clip there; "
+            "otherwise synthetic audio is generated, which is equivalent for timing."
+        ),
     )
     # Quality mode: stream a whole dataset split and emit a scorer manifest
     # instead of timing statistics, so quality and latency share one pipeline.

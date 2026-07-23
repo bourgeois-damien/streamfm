@@ -27,7 +27,7 @@ from experiments.benchmarks.runner import run_benchmark
 from experiments.core.repo import find_repo_root
 from experiments.core.devices import select_torch_device
 
-DEFAULT_INPUT_AUDIO = "inputs/test_clips/audio_43m28_10s.wav"
+DEFAULT_INPUT_AUDIO = "inputs/test_clips/benchmark_input_10s.wav"
 MODAL_HARDWARE = frozenset({"CPU", "T4", "L4", "L40S", "A100"})
 
 

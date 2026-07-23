@@ -33,7 +33,7 @@ from experiments.benchmarks.sweeps.sweep_grid import (
     load_sweep_trials,
 )
 
-DEFAULT_INPUT_AUDIO = "inputs/test_clips/audio_43m28_10s.wav"
+DEFAULT_INPUT_AUDIO = "inputs/test_clips/benchmark_input_10s.wav"
 GPU_HARDWARE = frozenset({"T4", "L4", "L40S", "A100"})
 GPU_WORKERS_CONFIRM_THRESHOLD = 4
 

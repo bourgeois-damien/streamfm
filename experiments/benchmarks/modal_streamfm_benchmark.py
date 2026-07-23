@@ -113,7 +113,7 @@ if _compressed_dir.is_dir():
 
 app = modal.App("streamfm-benchmark", image=image)
 
-DEFAULT_INPUT_AUDIO = "inputs/test_clips/audio_43m28_10s.wav"
+DEFAULT_INPUT_AUDIO = "inputs/test_clips/benchmark_input_10s.wav"
 
 
 # The helpers below mirror their twins in streamfm_benchmark.py; `modal run`

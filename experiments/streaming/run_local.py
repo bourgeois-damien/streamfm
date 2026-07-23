@@ -65,7 +65,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Simulated streaming audio pipeline for Stream.FM STFTPR.",
     )
-    parser.add_argument("--input", default="inputs/test_clips/audio_43m28_10s.wav")
+    parser.add_argument("--input", default="inputs/test_clips/benchmark_input_10s.wav")
     parser.add_argument("--output", default="")
     parser.add_argument("--json", default="")
     parser.add_argument("--device", default="auto")
@@ -74,6 +74,14 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--no-compiled", action="store_true")
     args = parser.parse_args()
+
+    # No audio ships with the repo: fail with a usable message rather than a
+    # backend decoding error.
+    if not Path(args.input).is_file():
+        parser.error(
+            f"input audio not found: {args.input}\n"
+            "Pass --input with your own 16 kHz mono WAV, or drop one at that path."
+        )
 
     device = select_device(args.device)
     model = load_stftpr_backbone(device)
