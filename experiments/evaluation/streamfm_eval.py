@@ -136,7 +136,12 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Execution: eager, compiled, cuda_graph, or tensorrt (streaming only).",
     )
     parser.add_argument("--trt-precision", default="fp16", choices=("fp32", "fp16", "int8"))
-    parser.add_argument("--trt-calib-steps", type=int, default=32, help="INT8 calibration steps.")
+    parser.add_argument(
+        "--trt-calib-steps",
+        type=int,
+        default=96,
+        help="INT8 calibration frames per excerpt (total = files x steps x solver settings).",
+    )
     parser.add_argument(
         "--trt-tf32",
         default="auto",

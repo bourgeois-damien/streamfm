@@ -156,27 +156,39 @@ def _preserve_modelopt_amax_buffers_for_export() -> None:
 
 
 def _apply_tensorrt_int8_ptq(
-    model, *, input_channels: int, input_freqs: int, calibration_steps: int
+    model,
+    *,
+    input_channels: int,
+    input_freqs: int,
+    calibration_steps: int,
+    quant_format: str = "int8",
+    quant_scope: str = "all",
+    quant_coverage: float = 0.8,
+    calibration_source: str = "audio",
+    calibration_files: int = 16,
+    calibration_seconds: float = 1.5,
+    calibration_split: str = "train",
+    calibration_solver_steps: tuple[int, ...] = (1, 5),
+    calibration_seed: int = 0,
 ):
-    """Calibrate ModelOpt Q/DQ on actual one-frame streaming calls."""
-    import torch
-    import modelopt.torch.quantization as mtq
+    """Calibrate ModelOpt Q/DQ on real streaming audio; see ``tensorrt/quantization.py``."""
+    from experiments.benchmarks.tensorrt.quantization import apply_int8_ptq
 
-    raw_step = getattr(type(model).forward_step, "__wrapped__", None)
-    if raw_step is None:
-        raise RuntimeError("TensorRT INT8 requires the raw CausalNCSNpp.forward_step implementation.")
-
-    def calibrate(module):
-        with torch.inference_mode():
-            # These are calibration samples, not latency samples.  Each starts
-            # from a fresh streaming state and uses the true one-frame API.
-            for _ in range(calibration_steps):
-                state = module.init_state()
-                x = torch.randn(1, input_channels, input_freqs, 1, device="cuda")
-                t = torch.rand(1, device="cuda")
-                raw_step(module, x, time_cond=t, state=state)
-
-    return mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=calibrate)
+    return apply_int8_ptq(
+        model,
+        quant_format=quant_format,
+        quant_scope=quant_scope,
+        quant_coverage=quant_coverage,
+        input_channels=input_channels,
+        input_freqs=input_freqs,
+        calibration_steps=calibration_steps,
+        calibration_source=calibration_source,
+        calibration_files=calibration_files,
+        calibration_seconds=calibration_seconds,
+        calibration_split=calibration_split,
+        calibration_solver_steps=calibration_solver_steps,
+        calibration_seed=calibration_seed,
+    )
 
 
 class TensorRTStreamingAdapter:
@@ -188,7 +200,15 @@ class TensorRTStreamingAdapter:
         *,
         dtype,
         precision: str = "fp16",
-        calibration_steps: int = 16,
+        calibration_steps: int = 96,
+        quant_scope: str = "all",
+        quant_coverage: float = 0.8,
+        calibration_source: str = "audio",
+        calibration_files: int = 16,
+        calibration_seconds: float = 1.5,
+        calibration_split: str = "train",
+        calibration_solver_steps: tuple[int, ...] = (1, 5),
+        calibration_seed: int = 0,
         use_cuda_graph: bool = False,
         memory_format: str = "contiguous",
         int8_fallback_dtype=None,
@@ -204,21 +224,21 @@ class TensorRTStreamingAdapter:
         # 1) Validate the precision/dtype pairing before any expensive work.
         if not torch.cuda.is_available():
             raise ValueError("TensorRT streaming requires CUDA.")
-        if precision not in {"fp32", "fp16", "int8"}:
-            raise ValueError("TensorRT precision must be 'fp32', 'fp16', or 'int8'.")
+        if precision not in {"fp32", "fp16", "int8", "fp8"}:
+            raise ValueError("TensorRT precision must be 'fp32', 'fp16', 'int8', or 'fp8'.")
         if precision == "fp32" and dtype != torch.float32:
             raise ValueError("TensorRT FP32 requires --dtype fp32.")
         if precision == "fp16" and dtype != torch.float16:
             raise ValueError("TensorRT FP16 requires --dtype fp16.")
-        if precision == "int8" and dtype != torch.float32:
+        if precision in {"int8", "fp8"} and dtype != torch.float32:
             raise ValueError(
-                "TensorRT INT8 PTQ calibrates and exports with FP32 model I/O; "
+                "TensorRT INT8/FP8 PTQ calibrates and exports with FP32 model I/O; "
                 "the requested floating-point fallback is configured separately."
             )
         if int8_fallback_dtype is None:
             int8_fallback_dtype = torch.float32
-        if precision == "int8" and int8_fallback_dtype not in {torch.float32, torch.float16}:
-            raise ValueError("TensorRT INT8 fallback must be FP32 or FP16.")
+        if precision in {"int8", "fp8"} and int8_fallback_dtype not in {torch.float32, torch.float16}:
+            raise ValueError("TensorRT INT8/FP8 fallback must be FP32 or FP16.")
         if not 0 <= optimization_level <= 5:
             raise ValueError("TensorRT optimization level must be between 0 and 5.")
         if num_avg_timing_iters < 1:
@@ -271,6 +291,16 @@ class TensorRTStreamingAdapter:
                 dtype=str(dtype).replace("torch.", ""),
                 int8_fallback_dtype=str(int8_fallback_dtype).replace("torch.", ""),
                 calibration_steps=calibration_steps,
+                quant_scope=quant_scope,
+                quant_coverage=quant_coverage,
+                # Calibration data shapes the Q/DQ ranges baked into the engine,
+                # so two engines calibrated differently are not interchangeable.
+                calibration_source=calibration_source,
+                calibration_files=calibration_files,
+                calibration_seconds=calibration_seconds,
+                calibration_split=calibration_split,
+                calibration_solver_steps=",".join(str(s) for s in calibration_solver_steps),
+                calibration_seed=calibration_seed,
                 memory_format=memory_format,
                 allow_tf32=allow_tf32,
                 optimization_level=optimization_level,
@@ -292,14 +322,34 @@ class TensorRTStreamingAdapter:
         # Calibration only shapes the engine that is about to be built; when a
         # cached engine already carries its Q/DQ ranges, paying for it again
         # would change nothing.
-        if precision == "int8" and cached_entry is None:
-            self.model = _apply_tensorrt_int8_ptq(
+        self.calibration_report: dict[str, Any] = {}
+        self.quantization_patches: dict[str, Any] = {}
+        if precision in {"int8", "fp8"} and cached_entry is None:
+            quantized, self.calibration_report = _apply_tensorrt_int8_ptq(
                 self.model,
                 input_channels=self.input_channels,
                 input_freqs=self.input_freqs,
                 calibration_steps=calibration_steps,
-            ).eval().requires_grad_(False)
+                quant_format=precision,
+                quant_scope=quant_scope,
+                quant_coverage=quant_coverage,
+                calibration_source=calibration_source,
+                calibration_files=calibration_files,
+                calibration_seconds=calibration_seconds,
+                calibration_split=calibration_split,
+                calibration_solver_steps=calibration_solver_steps,
+                calibration_seed=calibration_seed,
+            )
+            self.model = quantized.eval().requires_grad_(False)
             _preserve_modelopt_amax_buffers_for_export()
+            # Torch-TensorRT 2.7.0 folds the weight Q/DQ away and cannot convert
+            # a constant quantize input; without both patches the engine builds
+            # fine and runs every convolution in float.
+            from experiments.benchmarks.tensorrt.quantization import (
+                apply_torch_tensorrt_quantization_patches,
+            )
+
+            self.quantization_patches = apply_torch_tensorrt_quantization_patches()
         # 3) Build the pure step module and example inputs for export.
         self._template = self.model.init_state()
         self._initial_state = tuple(_flatten_tensor_state(self._template))
@@ -362,7 +412,7 @@ class TensorRTStreamingAdapter:
             self.engine_cache_state = "hit"
             self.engine_cache_path = str(cached_entry)
             exported_ops_profile = {"exported_ops_available": False}
-        elif precision == "int8":
+        elif precision in {"int8", "fp8"}:
             from modelopt.torch.quantization.utils import export_torch_mode
 
             with export_torch_mode():
@@ -372,7 +422,8 @@ class TensorRTStreamingAdapter:
             # enabled precision set controls what TensorRT may choose for the
             # remaining floating-point regions.  Calibration and public I/O
             # stay FP32 even when those regions are allowed to use FP16.
-            enabled_precisions = {torch.int8, self.int8_fallback_dtype}
+            quantized_dtype = torch.int8 if precision == "int8" else torch.float8_e4m3fn
+            enabled_precisions = {quantized_dtype, self.int8_fallback_dtype}
             compile_kwargs["enabled_precisions"] = enabled_precisions
             self.engine = torch_tensorrt.dynamo.compile(program, **compile_kwargs)
         else:
@@ -796,7 +847,15 @@ def build_tensorrt_streaming_adapter(
     *,
     dtype,
     precision: str = "fp16",
-    calibration_steps: int = 16,
+    calibration_steps: int = 96,
+    quant_scope: str = "all",
+    quant_coverage: float = 0.8,
+    calibration_source: str = "audio",
+    calibration_files: int = 16,
+    calibration_seconds: float = 1.5,
+    calibration_split: str = "train",
+    calibration_solver_steps: tuple[int, ...] = (1, 5),
+    calibration_seed: int = 0,
     use_cuda_graph: bool = False,
     memory_format: str = "contiguous",
     int8_fallback_dtype=None,
@@ -813,6 +872,14 @@ def build_tensorrt_streaming_adapter(
         dtype=dtype,
         precision=precision,
         calibration_steps=calibration_steps,
+        quant_scope=quant_scope,
+        quant_coverage=quant_coverage,
+        calibration_source=calibration_source,
+        calibration_files=calibration_files,
+        calibration_seconds=calibration_seconds,
+        calibration_split=calibration_split,
+        calibration_solver_steps=calibration_solver_steps,
+        calibration_seed=calibration_seed,
         use_cuda_graph=use_cuda_graph,
         memory_format=memory_format,
         int8_fallback_dtype=int8_fallback_dtype,

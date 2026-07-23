@@ -117,6 +117,14 @@ def build_cache_config(
     dtype: str,
     int8_fallback_dtype: str,
     calibration_steps: int,
+    quant_scope: str,
+    quant_coverage: float,
+    calibration_source: str,
+    calibration_files: int,
+    calibration_seconds: float,
+    calibration_split: str,
+    calibration_solver_steps: str,
+    calibration_seed: int,
     memory_format: str,
     allow_tf32: bool | None,
     optimization_level: int,
@@ -132,12 +140,27 @@ def build_cache_config(
     Stored verbatim next to the engine so a cache directory can be browsed and
     compared build by build, which is the point when tuning long builds.
     """
+    # INT8 and FP8 are both explicitly quantized: the same calibration-derived
+    # fields decide whether a stored engine is reusable.
+    quantized = precision in {"int8", "fp8"}
     config: dict[str, Any] = {
         "model_hash": model_hash,
         "precision": precision,
         "dtype": dtype,
-        "calibration_steps": calibration_steps if precision == "int8" else None,
-        "int8_fallback_dtype": int8_fallback_dtype if precision == "int8" else None,
+        "calibration_steps": calibration_steps if quantized else None,
+        # Quantizing a subset changes which layers carry Q/DQ, so a narrower
+        # scope is a different engine even at identical calibration.
+        "quant_scope": quant_scope if quantized else None,
+        "quant_coverage": quant_coverage if quantized else None,
+        # The calibration data determines the Q/DQ ranges baked into the engine,
+        # so an engine calibrated on other audio is a different engine.
+        "calibration_source": calibration_source if quantized else None,
+        "calibration_files": calibration_files if quantized else None,
+        "calibration_seconds": calibration_seconds if quantized else None,
+        "calibration_split": calibration_split if quantized else None,
+        "calibration_solver_steps": calibration_solver_steps if quantized else None,
+        "calibration_seed": calibration_seed if quantized else None,
+        "int8_fallback_dtype": int8_fallback_dtype if quantized else None,
         "memory_format": memory_format,
         "allow_tf32": allow_tf32,
         "optimization_level": optimization_level,

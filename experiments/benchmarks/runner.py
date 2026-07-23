@@ -220,6 +220,8 @@ def _benchmark_flow_task(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
+    ptq_scope: str = "all",
+    ptq_coverage: float = 0.8,
     tensorrt_allow_tf32: bool | None = None,
     tensorrt_optimization_level: int = 3,
     tensorrt_num_avg_timing_iters: int = 1,
@@ -242,7 +244,7 @@ def _benchmark_flow_task(
     # TensorRT may use internally; the engine I/O remains FP32 so Q/DQ scales
     # and recurrent-state export keep the already validated contract.
     int8_fallback_dtype = model_dtype
-    if use_tensorrt and tensorrt_precision == "int8":
+    if use_tensorrt and tensorrt_precision in {"int8", "fp8"}:
         import torch
 
         model_dtype = torch.float32
@@ -275,6 +277,8 @@ def _benchmark_flow_task(
             dtype=model_dtype,
             precision=tensorrt_precision,
             calibration_steps=ptq_calib_steps,
+            quant_scope=ptq_scope,
+            quant_coverage=ptq_coverage,
             use_cuda_graph=tensorrt_cuda_graph,
             memory_format=model_memory_format,
             int8_fallback_dtype=int8_fallback_dtype,
@@ -341,7 +345,7 @@ def _benchmark_flow_task(
                 **trt_validation,
                 "compilation_profile": getattr(model, "compilation_profile", {}),
             }
-            if tensorrt_precision == "int8":
+            if tensorrt_precision in {"int8", "fp8"}:
                 quality_manifest["ptq_int8"] = "tensorrt"
                 quality_manifest["ptq_calib_steps"] = ptq_calib_steps
                 quality_manifest["ptq_fallback_dtype"] = str(
@@ -551,7 +555,7 @@ def _benchmark_flow_task(
                     for key, value in getattr(model, "compilation_profile", {}).items()
                 }
             )
-            if tensorrt_precision == "int8":
+            if tensorrt_precision in {"int8", "fp8"}:
                 row["ptq_int8"] = "tensorrt"
                 row["ptq_calib_steps"] = ptq_calib_steps
                 row["ptq_fallback_dtype"] = str(int8_fallback_dtype).replace("torch.", "")
@@ -579,6 +583,8 @@ def _benchmark_se_predictor_task(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
+    ptq_scope: str = "all",
+    ptq_coverage: float = 0.8,
 ) -> tuple[list[dict], float, float]:
     """Load the SE predictor and time it alone: one DNN call per frame, no flow."""
     load_started_at = time.perf_counter()
@@ -646,6 +652,8 @@ def _benchmark_se_flow_task(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
+    ptq_scope: str = "all",
+    ptq_coverage: float = 0.8,
 ) -> tuple[list[dict], float, float]:
     """Load the SE flow backbone and time the Euler solver without the predictor."""
     load_started_at = time.perf_counter()
@@ -721,6 +729,8 @@ def _benchmark_se_full_task(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
+    ptq_scope: str = "all",
+    ptq_coverage: float = 0.8,
 ) -> tuple[list[dict], float, float]:
     """Load and benchmark the full SE chain: predictor + flow, 1 + steps DNN calls per frame."""
     load_started_at = time.perf_counter()
@@ -884,6 +894,8 @@ def run_internal_benchmark(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
+    ptq_scope: str = "all",
+    ptq_coverage: float = 0.8,
     tensorrt_allow_tf32: bool | None = None,
     tensorrt_optimization_level: int = 3,
     tensorrt_num_avg_timing_iters: int = 1,
@@ -935,6 +947,8 @@ def run_internal_benchmark(
             checkpoint_name=checkpoint_name,
             ptq_int8=ptq_int8,
             ptq_calib_steps=ptq_calib_steps,
+            ptq_scope=ptq_scope,
+            ptq_coverage=ptq_coverage,
             tensorrt_allow_tf32=tensorrt_allow_tf32,
             tensorrt_optimization_level=tensorrt_optimization_level,
             tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,
@@ -958,6 +972,8 @@ def run_internal_benchmark(
             checkpoint_name=checkpoint_name,
             ptq_int8=ptq_int8,
             ptq_calib_steps=ptq_calib_steps,
+            ptq_scope=ptq_scope,
+            ptq_coverage=ptq_coverage,
         )
     if internal_task == "se_flow":
         return _benchmark_se_flow_task(
@@ -976,6 +992,8 @@ def run_internal_benchmark(
             checkpoint_name=checkpoint_name,
             ptq_int8=ptq_int8,
             ptq_calib_steps=ptq_calib_steps,
+            ptq_scope=ptq_scope,
+            ptq_coverage=ptq_coverage,
         )
     if internal_task == "se_full":
         return _benchmark_se_full_task(
@@ -994,6 +1012,8 @@ def run_internal_benchmark(
             checkpoint_name=checkpoint_name,
             ptq_int8=ptq_int8,
             ptq_calib_steps=ptq_calib_steps,
+            ptq_scope=ptq_scope,
+            ptq_coverage=ptq_coverage,
         )
     raise ValueError("Unsupported internal task.")
 
@@ -1026,6 +1046,8 @@ def run_benchmark(
     checkpoint_name: str = "",
     ptq_int8: str = "",
     ptq_calib_steps: int = 32,
+    ptq_scope: str = "all",
+    ptq_coverage: float = 0.8,
     tf32_mode: str = "auto",
     cudnn_benchmark: bool = False,
     cudnn_benchmark_limit: int = 10,
@@ -1068,7 +1090,14 @@ def run_benchmark(
         raise ValueError("--cudnn-benchmark-limit must be non-negative (0 means exhaustive).")
     if not cudnn_benchmark and cudnn_benchmark_limit != 10:
         raise ValueError("--cudnn-benchmark-limit only applies with --cudnn-benchmark.")
-    trt_int8 = is_tensorrt and ptq_int8.strip().lower() == "tensorrt"
+    # "tensorrt_fp8" selects the same explicitly-quantized path with an FP8
+    # (E4M3) format instead of INT8.  It needs Ada or newer: L4 and L40S yes,
+    # T4 and A100 no.
+    _ptq_mode = ptq_int8.strip().lower()
+    trt_quant_format = (
+        "int8" if _ptq_mode == "tensorrt" else "fp8" if _ptq_mode == "tensorrt_fp8" else None
+    )
+    trt_int8 = is_tensorrt and trt_quant_format is not None
     if is_tensorrt and not trt_int8 and model_dtype_name.lower() not in {"fp16", "fp32"}:
         raise ValueError("TensorRT requires --dtype fp16 or --dtype fp32.")
     if trt_int8 and model_dtype_name.lower() not in {"fp32", "fp16"}:
@@ -1153,7 +1182,7 @@ def run_benchmark(
             use_compiled=resolved["use_compiled"],
             use_tensorrt=resolved["use_tensorrt"],
             tensorrt_precision=(
-                "int8"
+                trt_quant_format
                 if trt_int8
                 else ("fp32" if model_dtype_name.lower() == "fp32" else "fp16")
             ),
@@ -1168,6 +1197,8 @@ def run_benchmark(
             checkpoint_name=checkpoint_name,
             ptq_int8=ptq_int8,
             ptq_calib_steps=ptq_calib_steps,
+            ptq_scope=ptq_scope,
+            ptq_coverage=ptq_coverage,
             tensorrt_allow_tf32=(None if tf32_mode == "auto" else tf32_mode == "on"),
             tensorrt_optimization_level=tensorrt_optimization_level,
             tensorrt_num_avg_timing_iters=tensorrt_num_avg_timing_iters,

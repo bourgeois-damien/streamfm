@@ -970,7 +970,18 @@ class CausalConv2d(nn.Conv2d, CausalStreamingModule):
 
         # Run the conv, produces a single output frame
         xbuf_in = xbuf.view(1, C, Fr, -1)
-        h = super().forward(xbuf_in)
+        input_quantizer = getattr(self, "input_quantizer", None)
+        weight_quantizer = getattr(self, "weight_quantizer", None)
+        if input_quantizer is None and weight_quantizer is None:
+            h = super().forward(xbuf_in)
+        else:
+            # PTQ attaches quantizers to the class, but ``super().forward()``
+            # resolves to ``nn.Conv2d.forward`` and would bypass them, leaving
+            # every convolution in float.  Nothing else changes: without
+            # quantizers attached this branch is never taken.
+            conv_in = xbuf_in if input_quantizer is None else input_quantizer(xbuf_in)
+            weight = self.weight if weight_quantizer is None else weight_quantizer(self.weight)
+            h = self._conv_forward(conv_in, weight, self.bias)
         if self.depthwise_separable:
             h = self.pointwise_conv(h)
         return h, (xbuf,)

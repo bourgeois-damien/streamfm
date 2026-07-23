@@ -48,6 +48,13 @@ image = (
         "torchaudio==2.7.0",
         "audiomentations==0.41.0",
         "distillmos==0.9.1",
+        # distillmos -> xls-r-sqa pulls transformers (unpinned).  Cap it: modelopt
+        # 0.17.0 references transformers.modeling_utils.Conv1D, which transformers
+        # >=4.48 removed from that namespace, so the INT8 quant path crashes on a
+        # newer transformers.  4.44.2 keeps the re-export and satisfies xls-r-sqa
+        # (transformers>=4.25).  Not part of the TRT toolchain, so the engine-cache
+        # key is unaffected.
+        "transformers==4.44.2",
         "einops==0.8.1",
         "hydra-core==1.3.2",
         "matplotlib==3.10.1",
@@ -166,7 +173,9 @@ def _run_modal_eval(
     continue_on_error: bool,
     config_overrides: list[str] | tuple[str, ...] = (),
     trt_precision: str = "fp16",
-    trt_calib_steps: int = 32,
+    trt_calib_steps: int = 96,
+    trt_quant_scope: str = "all",
+    trt_quant_coverage: float = 0.8,
     trt_tf32: str = "auto",
     trt_optimization_level: int = 3,
     trt_num_avg_timing_iters: int = 1,
@@ -221,6 +230,8 @@ def _run_modal_eval(
         config_overrides=config_overrides,
         tensorrt_precision=trt_precision,
         tensorrt_calibration_steps=trt_calib_steps,
+        tensorrt_quant_scope=trt_quant_scope,
+        tensorrt_quant_coverage=trt_quant_coverage,
         tensorrt_allow_tf32=(None if trt_tf32 == "auto" else trt_tf32 == "on"),
         tensorrt_optimization_level=trt_optimization_level,
         tensorrt_num_avg_timing_iters=trt_num_avg_timing_iters,
@@ -285,7 +296,9 @@ def main(
     pipeline: str = "offline",
     execution: str = "eager",
     trt_precision: str = "fp16",
-    trt_calib_steps: int = 32,
+    trt_calib_steps: int = 96,
+    trt_quant_scope: str = "all",
+    trt_quant_coverage: float = 0.8,
     trt_tf32: str = "auto",
     trt_optimization_level: int = 3,
     trt_num_avg_timing_iters: int = 1,
@@ -338,6 +351,8 @@ def main(
         execution=execution,
         trt_precision=trt_precision,
         trt_calib_steps=trt_calib_steps,
+        trt_quant_scope=trt_quant_scope,
+        trt_quant_coverage=trt_quant_coverage,
         trt_tf32=trt_tf32,
         trt_optimization_level=trt_optimization_level,
         trt_num_avg_timing_iters=trt_num_avg_timing_iters,
@@ -377,6 +392,8 @@ def main(
         "execution": execution,
         "trt_precision": trt_precision,
         "trt_calib_steps": trt_calib_steps,
+        "trt_quant_scope": trt_quant_scope,
+        "trt_quant_coverage": trt_quant_coverage,
         "trt_tf32": trt_tf32,
         "trt_optimization_level": trt_optimization_level,
         "trt_num_avg_timing_iters": trt_num_avg_timing_iters,
