@@ -86,7 +86,11 @@ def main(cfg: omegaconf.DictConfig) -> None:
                 dirpath=str(checkpoint_dir),
                 filename="step={step:08d}",
                 every_n_train_steps=checkpoint_every_n_train_steps,
-                save_top_k=2,
+                # No monitored quantity here -- these are recovery points, not
+                # best-model selection -- and Lightning only accepts 0, 1 or -1
+                # for save_top_k when monitor is None.  1 keeps the newest
+                # snapshot, save_last keeps last.ckpt in step with it.
+                save_top_k=1,
                 save_last=True,
             )
         )

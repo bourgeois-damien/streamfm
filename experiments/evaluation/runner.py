@@ -68,7 +68,7 @@ def _setup_split(data_module, split: str):
         data_module.setup(stage="test")
         return data_module.test_set
     if split == "valid":
-        data_module.setup(stage="fit")
+        data_module.setup(stage="_valid_only")
         return data_module.valid_set
     if split == "train":
         data_module.setup(stage="_train_only")
