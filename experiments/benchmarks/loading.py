@@ -122,6 +122,7 @@ def load_backbone_from_checkpoint(
     paths,
     full_checkpoint_name=None,
     full_checkpoint_state_prefix=None,
+    backbone_transform=None,
 ):
     """Instantiate a configured backbone and load DNN-only or full-checkpoint DNN weights."""
     from hydra import compose, initialize_config_dir
@@ -143,11 +144,17 @@ def load_backbone_from_checkpoint(
     # architecture must be adapted BEFORE the strict state-dict load.
     apply_backbone_compression_(backbone, compression_metadata, backbone_path=full_checkpoint_state_prefix or "dnn")
     backbone.load_state_dict(backbone_state, strict=True)
+    # Optional in-place structural transform (e.g. depth pruning) applied AFTER
+    # the strict load, so the surviving weights are exactly the teacher's. Done
+    # before the dtype/device cast so swapped-in modules follow the rest.
+    if backbone_transform is not None:
+        backbone = backbone_transform(backbone)
     backbone = backbone.eval().to(device=device, dtype=dtype)
     return backbone, cfg
 
 
-def load_flow_model(device, dtype, paths, task="stftpr", checkpoint_name: str | None = None):
+def load_flow_model(device, dtype, paths, task="stftpr", checkpoint_name: str | None = None,
+                    backbone_transform=None):
     """Load a flow-only Stream.FM backbone for STFTPR/BWE/DEREV/LYRA."""
     task = task.lower().replace("-", "_")
     if task not in FLOW_TASK_CHECKPOINTS:
@@ -162,6 +169,7 @@ def load_flow_model(device, dtype, paths, task="stftpr", checkpoint_name: str | 
         device=device,
         dtype=dtype,
         paths=paths,
+        backbone_transform=backbone_transform,
     )
 
 

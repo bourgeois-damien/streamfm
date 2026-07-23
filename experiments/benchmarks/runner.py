@@ -227,6 +227,7 @@ def _benchmark_flow_task(
     tensorrt_engine_cache: str = "off",
     tensorrt_engine_cache_dir: str = "",
     quality=None,
+    backbone_transform=None,
 ) -> tuple[list[dict], float, float]:
     """Load and benchmark a flow-only task (stftpr/bwe/derev/lyra).
 
@@ -246,7 +247,14 @@ def _benchmark_flow_task(
 
         model_dtype = torch.float32
     load_dtype = _ptq_calibration_load_dtype("" if use_tensorrt else ptq_int8, model_dtype)
-    model, cfg = load_flow_model(device, load_dtype, paths, task=task, checkpoint_name=checkpoint_name or None)
+    model, cfg = load_flow_model(
+        device,
+        load_dtype,
+        paths,
+        task=task,
+        checkpoint_name=checkpoint_name or None,
+        backbone_transform=backbone_transform,
+    )
     model, _ptq_meta, model_dtype = _apply_ptq_int8_if_requested(
         model,
         # TensorRT INT8 uses ModelOpt Q/DQ below; do not apply the separate
@@ -883,6 +891,7 @@ def run_internal_benchmark(
     tensorrt_engine_cache: str = "off",
     tensorrt_engine_cache_dir: str = "",
     quality=None,
+    backbone_transform=None,
 ) -> tuple[list[dict], float, float]:
     """Dispatch a benchmark run by task family: flow backbones vs the three SE variants.
 
@@ -908,6 +917,7 @@ def run_internal_benchmark(
         return _benchmark_flow_task(
             task=internal_task,
             internal_pipeline=internal_pipeline,
+            backbone_transform=backbone_transform,
             steps_list=steps_list,
             iterations=iterations,
             warmup=warmup,
@@ -1025,6 +1035,7 @@ def run_benchmark(
     tensorrt_engine_cache: str = "off",
     tensorrt_engine_cache_dir: str = "",
     quality=None,
+    backbone_transform=None,
 ) -> list[dict]:
     """Run one benchmark end to end; the single entry point shared by local CLI and Modal.
 
@@ -1164,6 +1175,7 @@ def run_benchmark(
             tensorrt_engine_cache=tensorrt_engine_cache,
             tensorrt_engine_cache_dir=tensorrt_engine_cache_dir,
             quality=quality,
+            backbone_transform=backbone_transform,
         )
 
     # 3) Run the timing loops, optionally under the PyTorch profiler. The

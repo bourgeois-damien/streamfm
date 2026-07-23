@@ -244,6 +244,11 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Maximum cuDNN v8 convolution plans to benchmark; 0 tries every available plan.",
     )
     parser.add_argument("--ckpt", default="", help="Optional full checkpoint; compressed checkpoints are detected automatically.")
+    parser.add_argument(
+        "--prune-drop",
+        default="",
+        help="Comma-separated dotted residual-block paths to structurally drop (see prune_resblocks_).",
+    )
     parser.add_argument("--num-threads", type=int, default=0, help="CPU only. 0 leaves PyTorch default unchanged.")
     parser.add_argument("--num-interop-threads", type=int, default=0, help="CPU only. 0 leaves PyTorch default unchanged.")
     parser.add_argument(
@@ -386,6 +391,18 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--wandb-tags", default="", help="Comma-separated extra W&B tags.")
 
 
+def _backbone_transform(args: argparse.Namespace):
+    """Build the prune_resblocks_ transform from --prune-drop, or None."""
+    drop = [name.strip() for name in args.prune_drop.split(",") if name.strip()]
+    if not drop:
+        return None
+    from functools import partial
+
+    from sgmse.backbones.streaming_unet import prune_resblocks_
+
+    return partial(prune_resblocks_, drop=drop)
+
+
 def _run_local(args: argparse.Namespace, hardware: str) -> None:
     """Run the benchmark directly on local hardware."""
     device = select_torch_device(hardware)
@@ -436,6 +453,7 @@ def _run_local(args: argparse.Namespace, hardware: str) -> None:
         tensorrt_engine_cache=args.trt_engine_cache,
         tensorrt_engine_cache_dir=args.trt_engine_cache_dir,
         quality=_quality_options(args),
+        backbone_transform=_backbone_transform(args),
     )
     _save_audio_results(results, args, backend="local", hardware=hardware)
     record_benchmark_results(

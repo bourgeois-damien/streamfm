@@ -299,6 +299,8 @@ def run_test_set_inference(
     num_interop_threads: int = 0,
     cache_info: dict | None = None,
     config_overrides: list[str] | tuple[str, ...] = (),
+    backbone_transform=None,
+    backbone_pre_transform=None,
     float32_matmul_precision: str = "high",
     tensorrt_precision: str = "fp16",
     tensorrt_calibration_steps: int = 32,
@@ -382,7 +384,20 @@ def run_test_set_inference(
     # A compressed checkpoint describes its changed backbone architecture in metadata.
     # Build that architecture before loading its incompatible state_dict shapes.
     model = apply_checkpoint_compression_(model, checkpoint)
+    # Optional in-place backbone transform applied BEFORE loading: this is the
+    # path for a checkpoint that was already trained in the transformed shape
+    # (e.g. a depth-pruned model healed by fine-tuning). Its state_dict has no
+    # entries for the dropped blocks, so the architecture must match first.
+    if backbone_pre_transform is not None:
+        model.transform_backbone_(backbone_pre_transform)
     model.load_state_dict(checkpoint["state_dict"])
+    # Optional in-place backbone transform applied AFTER loading the (full)
+    # teacher weights: this is the warm-start zero-shot pruning path. The teacher
+    # is loaded strict, then whole residual blocks are swapped for identities, so
+    # the surviving weights are exactly the teacher's -- no fine-tune. Applied
+    # before eval/.to so the swapped-in modules move to the device with the rest.
+    if backbone_transform is not None:
+        model.transform_backbone_(backbone_transform)
     model = model.eval().to(device=device)
     # For fp16/bf16 we use autocast instead of casting the weights: the STFT/iSTFT
     # front-end runs through cuFFT and torch.polar, neither of which has a CUDA

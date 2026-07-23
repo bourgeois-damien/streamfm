@@ -57,7 +57,10 @@ class StreamingIdentity(nn.Module, CausalStreamingModule):
     def init_state(self, *args, **kwargs):
         return ()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        # Accept and ignore extra positional/keyword args (e.g. the time
+        # embedding passed to residual blocks) so this can transparently stand
+        # in for a pruned CausalResnetBlock in the eager forward() path.
         return x
 
 
@@ -600,6 +603,61 @@ def compress_decoupled_(model, K: int | Callable[[str, nn.Module], int], module_
 
     # we store this flag in a registered buffer so it gets saved/loaded with the model state_dict
     model.register_buffer('_compressed_decoupled', torch.tensor(True))
+    return model
+
+
+### Structured depth pruning: drop whole residual blocks (replace by identity)
+
+def prune_resblocks_(model, drop):
+    """
+    Structurally prune the backbone **in-place** by replacing whole residual
+    blocks with :class:`StreamingIdentity`.
+
+    This is a depth-reduction lever: on the streaming (forward_step) path the
+    per-frame latency is dominated by the sequential chain of kernel launches,
+    so removing blocks from that chain shortens the critical path -- unlike
+    width/weight compression, which mostly reduces size.  A dropped block adds
+    nothing to its input (``out = x``), which is exactly the limit an
+    iso-channel BigGAN residual block approaches as its residual branch -> 0.
+
+    Only *iso-channel* blocks (``in_ch == out_ch`` and no freq up/down-sampling)
+    may be dropped: those are the blocks whose skip connection is already an
+    identity, so replacing the whole block preserves the channel/frequency
+    bookkeeping of the U-Net and the positional state indexing of
+    ``init_state``/``forward_step`` (``StreamingIdentity.init_state`` returns an
+    empty state, keeping ``m_idx`` aligned).
+
+    Args:
+        - drop: iterable of dotted block paths relative to the backbone, e.g.
+          ``["down_modules.lvl0_rnb0", "up_modules.lvl2_rnb1"]`` (the names
+          produced by ``experiments.pruning.block_influence``).
+    """
+    drop = list(drop)
+    modules = dict(model.named_modules())
+    for name in drop:
+        if name not in modules:
+            raise KeyError(f"prune_resblocks_: no module named {name!r} in the backbone.")
+        module = modules[name]
+        if not isinstance(module, CausalResnetBlockBigGANpp):
+            raise TypeError(
+                f"prune_resblocks_: {name} is a {type(module).__name__}, not a residual block; "
+                "only CausalResnetBlock* blocks can be dropped.")
+        iso = (module.in_ch == module.out_ch) and not module.freq_up and not module.freq_down
+        if not iso:
+            raise ValueError(
+                f"prune_resblocks_: {name} is not iso-channel "
+                f"(in_ch={module.in_ch}, out_ch={module.out_ch}, "
+                f"freq_up={module.freq_up}, freq_down={module.freq_down}); "
+                "dropping it would break the U-Net channel/skip bookkeeping.")
+
+        print(f"Pruning residual block {name} (replacing with StreamingIdentity)")
+        parent = model
+        *path, last = name.split('.')
+        for p in path:
+            parent = getattr(parent, p)
+        setattr(parent, last, StreamingIdentity())
+
+    model.register_buffer('_num_pruned_resblocks', torch.tensor(len(drop)))
     return model
 
 
