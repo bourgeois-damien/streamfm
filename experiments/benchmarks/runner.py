@@ -1233,7 +1233,7 @@ def run_benchmark(
             int(cudnn_benchmark_limit) if device.type == "cuda" and cudnn_benchmark else None
         )
         row["inductor_compile_mode"] = (
-            "max-autotune-no-cudagraphs" if resolved["use_compiled"] else None
+            "max-autotune" if resolved["use_compiled"] else None
         )
         row["tensorrt_optimization_level"] = tensorrt_optimization_level if is_tensorrt else None
         row["tensorrt_num_avg_timing_iters"] = tensorrt_num_avg_timing_iters if is_tensorrt else None

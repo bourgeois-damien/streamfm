@@ -475,10 +475,9 @@ class CausalNCSNpp(nn.Module, CausalStreamingModule):
             for v in obj:
                 self.zero_state(v)
 
-    # Let Inductor benchmark candidate kernels without wrapping this model
-    # fragment in its own CUDA Graph.  The benchmark runner captures the whole
-    # streaming solver afterwards, which avoids nested/partial graph capture.
-    @torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
+    # Benchmark candidate kernels and enable the standard max-autotune runtime
+    # optimizations, including CUDA Graphs when the backend supports them.
+    @torch.compile(fullgraph=True, mode="max-autotune")
     def forward_step(self, x: torch.Tensor, time_cond=None, aux_condition=None, *, state: list) -> Tuple[torch.Tensor, List]:
         """
         Forward pass for a single frame.
