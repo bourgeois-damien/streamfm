@@ -1,116 +1,122 @@
 # Experiments
 
-Project-specific experiments and runnable helpers built on top of the original
-Stream.FM codebase.
+Everything this fork adds on top of the upstream Stream.FM codebase: the harnesses that
+measure streaming inference cost, the harness that scores restoration quality, and the
+compression studies built on both.
 
-Keep stable model/library code in `sgmse/`, the official training and inference
-entrypoints at the repository root, and local exploration here. Everything under
-`experiments/` is organised as a real package: infrastructure shared by several
-areas lives in `core/`, and each area (streaming, benchmarks, evaluation, …) is
-its own subpackage.
+Stable model and library code stays in `sgmse/`, the upstream training and inference entry
+points stay at the repository root, and all exploration lives here. `experiments/` is a real
+Python package: infrastructure shared by several areas lives in `core/`, and each area is its
+own subpackage.
 
 ## Layout
 
 ```text
 experiments/
-├── core/                     # shared infra, no experiment logic of its own
-│   ├── repo.py               # repo root + import path (no torch)
+├── core/                     # shared infrastructure, no experiment logic of its own
+│   ├── repo.py               # repo root + import path (torch-free)
 │   ├── devices.py            # device selection, sync, matmul precision
-│   ├── tensors.py            # memory format + tensor helpers
+│   ├── tensors.py            # memory format + real/imag channel packing
 │   ├── streaming_state.py    # forward_step and streaming-state helpers
-│   ├── timing.py             # ms summaries
-│   ├── history.py            # atomic JSON writes + history file lock
-│   ├── paths.py              # checkpoint/config path resolution
+│   ├── timing.py             # latency-sample summaries (mean / percentiles)
+│   ├── history.py            # atomic, lock-protected JSON history writes
+│   ├── paths.py              # checkpoint/config/output path resolution
 │   ├── options.py            # benchmark CLI option normalization
-│   └── modal_cache.py        # shared Modal cache configuration
-├── baseline/
-│   └── streamfm_se_baseline.py   # from-scratch SE reference loop
-├── streaming/
-│   ├── pipeline.py           # public streaming API (re-exports)
+│   └── modal_cache.py        # shared Modal volume/cache configuration
+├── streaming/                # the simulated real-time audio path
+│   ├── pipeline.py           # public streaming API (thin re-export facade)
 │   ├── stft.py               # STFT framing / compression / synthetic audio
 │   ├── eager.py              # eager frame-by-frame pipelines
 │   ├── cuda_graph.py         # CUDA Graph pipeline variants
-│   └── run_local.py          # local streaming CLI (STFTPR)
-├── benchmarks/
-│   ├── streamfm_benchmark.py     # unified local/Modal CLI (entry point)
+│   ├── enhance.py            # streaming enhancement + algorithmic delay
+│   └── run_local.py          # local streaming CLI
+├── benchmarks/               # latency and throughput measurement
+│   ├── streamfm_benchmark.py     # ENTRY POINT: local/Modal benchmark CLI
 │   ├── runner.py                 # in-process benchmark driver
 │   ├── model_loops.py            # eager timing loops
 │   ├── cuda_graph.py             # CUDA Graph timing loops
 │   ├── loading.py                # checkpoint/backbone loading
+│   ├── quality.py                # quality checks alongside timing
 │   ├── results.py                # history summaries + W&B logging
-│   ├── modal_streamfm_benchmark.py   # Modal remote entrypoints
-│   ├── cuda_profile_range.py         # profiler range markers
-│   ├── profiling/                # backbone profiling (local + Modal + Nsight)
-│   ├── tensorrt/                 # TensorRT streaming + INT8 probe
+│   ├── modal_streamfm_benchmark.py   # Modal image, volumes, remote entry points
+│   ├── cuda_profile_range.py     # profiler range markers
+│   ├── profiling/                # PyTorch profiler, Nsight Systems/Compute, macOS CPU
+│   ├── tensorrt/                 # TensorRT streaming engines, INT8 calibration, engine cache
 │   └── sweeps/                   # grid expansion and trial runners
-├── evaluation/
-│   ├── streamfm_eval.py          # test-set inference CLI (entry point)
+├── evaluation/               # test-set inference and metric scoring
+│   ├── streamfm_eval.py          # ENTRY POINT: test-set inference CLI
 │   ├── runner.py                 # in-process inference driver
 │   ├── options.py                # task defaults + option normalization
 │   ├── results.py                # history summaries + W&B logging
-│   ├── modal_streamfm_eval.py    # Modal remote entrypoints
-│   ├── modal_defaults.py         # default data paths on Modal
-│   ├── scoring/                  # metric scoring + subset convergence
+│   ├── modal_streamfm_eval.py    # Modal remote entry points
+│   ├── modal_defaults.py         # default dataset paths on Modal
+│   ├── scoring/
+│   │   ├── score_manifest.py     # ENTRY POINT: metric computation
+│   │   ├── modal_score_manifest.py
+│   │   └── subset_convergence.py # how many test files are needed for stable metrics
 │   └── sweeps/                   # eval grid runner
+├── pruning/                  # structured depth pruning study
+│   ├── block_influence.py            # rank residual blocks by Block Influence
+│   ├── modal_block_influence.py      # the same, on Modal
+│   ├── modal_ablation.py             # zero-shot quality vs. blocks removed
+│   ├── modal_eval_healed.py          # quality after the healing fine-tune
+│   ├── modal_prune_latency.py        # measured latency vs. blocks removed
+│   └── modal_true_1resblock_latency.py
 ├── inference/
 │   ├── local.py                  # minimal local inference entry point
 │   └── compress_modal.py         # checkpoint compression on Modal
-├── datasets/                     # dataset provisioning/inspection on Modal
-├── tools/                        # one-shot maintenance scripts (run by hand)
-│   ├── upload_history_to_wandb.py       # backfill benchmark W&B from saved history
-│   └── upload_eval_history_to_wandb.py  # backfill eval W&B from saved history
-└── training/
-    └── modal_train.py            # durable Modal training launcher
+├── datasets/                 # dataset provisioning/inspection on Modal
+├── training/
+│   └── modal_train.py        # durable Modal training launcher
+├── baseline/
+│   └── streamfm_se_baseline.py   # from-scratch reference loop the optimized paths beat
+└── tools/                    # one-shot maintenance scripts, run by hand
 ```
 
-Data and artifact directories (`audio/`, `inputs/`, `outputs/`, `checkpoints/`,
-`papers/`) are local and ignored by git.
+Data and artifact directories (`inputs/`, `outputs/`, `checkpoints/`, `papers/`) are local and
+git-ignored. Measurement dumps quoted by the write-ups live in `results/`.
 
 ## What belongs where
 
-- `core/` holds everything shared across areas and nothing task-specific.
-  `repo.py`, `streaming_state.py`, `timing.py` and `history.py` are torch-free;
-  `devices.py` and `tensors.py` import torch lazily so the infra modules stay
-  cheap to import.
-- `baseline/` is the plain from-scratch reference the optimized paths are
-  compared against.
-- `streaming/` is the simulated real-time audio path. `pipeline.py` is a thin
-  public facade; the work lives in `stft.py`, `eager.py` and `cuda_graph.py`.
-- `benchmarks/` measures latency/throughput of the model blocks and audio
-  pipelines. `streamfm_benchmark.py` is the CLI, `runner.py` orchestrates, and
-  the loops live in `model_loops.py` / `cuda_graph.py`.
-- `evaluation/` runs test-set inference and scoring. `streamfm_eval.py` is the
-  CLI, `runner.py` drives inference, and `scoring/` computes the metrics.
+- `core/` holds what is shared across areas and nothing task-specific. `repo.py`,
+  `streaming_state.py`, `timing.py` and `history.py` are torch-free; `devices.py` and
+  `tensors.py` import torch lazily, so the infrastructure modules stay cheap to import.
+- `streaming/` is the simulated real-time audio path. `pipeline.py` is a thin public facade;
+  the work lives in `stft.py`, `eager.py` and `cuda_graph.py`.
+- `benchmarks/` measures latency and throughput of the model blocks and audio pipelines.
+- `evaluation/` runs test-set inference and scoring.
+- `pruning/` is the structured depth-pruning study: rank blocks, ablate, heal, re-measure.
 - `inference/` is minimal one-shot enhancement without the full eval harness.
-- `datasets/` and `training/` are the Modal-side provisioning and training
-  launchers.
+- `datasets/` and `training/` are the Modal-side provisioning and training launchers.
 
-Move code into `sgmse/` only when it becomes reusable model or library code
-rather than experiment glue.
+Move code into `sgmse/` only when it becomes reusable model or library code rather than
+experiment glue.
 
 ## Read order
 
-For streaming audio: `streaming/pipeline.py`, then `streaming/stft.py`, then
-`streaming/eager.py` or `streaming/cuda_graph.py`.
+- **Streaming audio**: `streaming/pipeline.py` → `streaming/stft.py` → `streaming/eager.py` or
+  `streaming/cuda_graph.py`.
+- **Benchmarks**: `benchmarks/streamfm_benchmark.py` → `benchmarks/runner.py` → the specific
+  loop (`model_loops.py`, `cuda_graph.py`, `loading.py`, `results.py`).
+- **Evaluation**: `evaluation/streamfm_eval.py` → `evaluation/runner.py` →
+  `evaluation/scoring/score_manifest.py`.
 
-For benchmarks: `benchmarks/streamfm_benchmark.py`, then `benchmarks/runner.py`,
-then the specific loop you need (`model_loops.py`, `cuda_graph.py`,
-`loading.py`, `results.py`).
+---
 
-For evaluation: `evaluation/streamfm_eval.py`, then `evaluation/runner.py`, then
-`evaluation/scoring/score_manifest.py`.
+# Command reference
 
-## Commandes utiles (benchmark, éval et métriques)
+The three scripts below are the ones you will actually run. They share the same
+model-configuration flags, so a configuration measured for speed is the same configuration
+scored for quality.
 
-Les trois scripts principaux sont :
+- [`benchmarks/streamfm_benchmark.py`](benchmarks/streamfm_benchmark.py) — measure latency.
+- [`evaluation/streamfm_eval.py`](evaluation/streamfm_eval.py) — run test-set inference.
+- [`evaluation/scoring/score_manifest.py`](evaluation/scoring/score_manifest.py) — compute the
+  metrics.
 
-- [experiments/benchmarks/streamfm_benchmark.py](benchmarks/streamfm_benchmark.py) pour mesurer un benchmark de modèle ou de pipeline audio.
-- [experiments/evaluation/streamfm_eval.py](evaluation/streamfm_eval.py) pour lancer l’inférence sur la split de test.
-- [experiments/evaluation/scoring/score_manifest.py](evaluation/scoring/score_manifest.py) pour calculer les métriques (SI-SDR, ESTOI, LSD, PSNR, PESQ, et éventuellement DistillMOS).
+## 1. Run a benchmark
 
-### 1. Lancer un benchmark
-
-Exemple local :
+Local:
 
 ```bash
 python experiments/benchmarks/streamfm_benchmark.py \
@@ -126,7 +132,7 @@ python experiments/benchmarks/streamfm_benchmark.py \
   --output-json outputs/benchmark_demo.json
 ```
 
-Exemple Modal :
+On Modal:
 
 ```bash
 python experiments/benchmarks/streamfm_benchmark.py \
@@ -141,28 +147,30 @@ python experiments/benchmarks/streamfm_benchmark.py \
   --warmup 10
 ```
 
-Paramètres principaux :
+Main options:
 
-- `--backend` / `--local` : exécuter localement ou via Modal.
-- `--hardware` : `auto`, `cpu`, `mps`, `cuda` localement ; `cpu`, `t4`, `l4`, `l40s`, `a100` sur Modal.
-- `--task` : `stftpr`, `bwe`, `derev`, `lyra`, `se`.
-- `--part` : `model`, `predictor`, `flow`.
-- `--pipeline` : `model_only` (bloc de modèle uniquement) ou `audio` (pipeline audio complet).
-- `--execution` : `auto`, `eager`, `compiled`, `cuda_graph`, `tensorrt`, `tensorrt_cuda_graph` (les deux modes TensorRT nécessitent CUDA et `--dtype fp32`/`fp16` ; `tensorrt_cuda_graph` rejoue en plus le solveur complet en CUDA Graph).
-- `--steps` : nombre de pas du flow, séparés par des virgules si besoin.
-- `--iterations` : nombre de frames mesurées ; utiliser `--audio-duration-s` pour piloter la durée au lieu du nombre d’itérations.
-- `--warmup` : nombre de frames de chauffe.
-- `--audio-duration-s` : remplace `--iterations` pour un run audio basé sur une durée en secondes.
-- `--dtype` : `fp32`, `fp16`, `bf16`.
-- `--num-threads` / `--num-interop-threads` : réglages CPU.
-- `--memory-format` : `contiguous` ou `channels_last`.
-- `--preallocate-model-buffers` : réutilise les tampons de modèle quand c’est possible.
-- `--save-audio` / `--audio-output-dir` / `--input-audio` : enregistrer l’audio de sortie et choisir le fichier d’entrée.
-- `--output-json` / `--history-json` : écrire les résultats au format JSON.
+- `--backend` / `--local` — run locally or dispatch to Modal.
+- `--hardware` — `auto`, `cpu`, `mps`, `cuda` locally; `cpu`, `t4`, `l4`, `l40s`, `a100` on Modal.
+- `--task` — `stftpr`, `bwe`, `derev`, `lyra`, `se`.
+- `--part` — `model`, `predictor`, `flow`.
+- `--pipeline` — `model_only` (model block alone) or `audio` (full audio pipeline).
+- `--execution` — `auto`, `eager`, `compiled`, `cuda_graph`, `tensorrt`, `tensorrt_cuda_graph`.
+  Both TensorRT modes require CUDA and `--dtype fp32`/`fp16`; `tensorrt_cuda_graph` additionally
+  replays the whole solver inside a CUDA Graph.
+- `--steps` — number of flow steps (NFE), comma-separated for several values.
+- `--iterations` — number of measured frames; use `--audio-duration-s` to drive the run by
+  duration instead.
+- `--warmup` — number of warm-up frames.
+- `--dtype` — `fp32`, `fp16`, `bf16`.
+- `--num-threads` / `--num-interop-threads` — CPU threading.
+- `--memory-format` — `contiguous` or `channels_last`.
+- `--preallocate-model-buffers` — reuse model buffers where possible.
+- `--save-audio` / `--audio-output-dir` / `--input-audio` — save output audio, choose the input.
+- `--output-json` / `--history-json` — write results as JSON.
 
-### 2. Lancer une évaluation sur la split de test
+## 2. Run a test-set evaluation
 
-Exemple local :
+Local:
 
 ```bash
 python experiments/evaluation/streamfm_eval.py \
@@ -182,7 +190,7 @@ python experiments/evaluation/streamfm_eval.py \
   --score-include-per-file
 ```
 
-Exemple Modal :
+On Modal:
 
 ```bash
 python experiments/evaluation/streamfm_eval.py \
@@ -197,49 +205,49 @@ python experiments/evaluation/streamfm_eval.py \
   --selection-seed 42
 ```
 
-Par défaut, `streamfm_eval.py` évalue des fichiers complets (`--crop-mode full`).
-`--limit 0` évalue toute la split ; `--limit N` sélectionne un sous-ensemble
-aléatoire répétable via `--selection random --selection-seed 42`.
+By default `streamfm_eval.py` evaluates whole files (`--crop-mode full`). `--limit 0` evaluates
+the entire split; `--limit N` selects a repeatable random subset via
+`--selection random --selection-seed 42`.
 
-Quand `--backend modal` est utilisé, `streamfm_eval.py` délègue en interne à
-`evaluation/modal_streamfm_eval.py` ; il n'y a pas besoin d'appeler le wrapper
-Modal directement.
+With `--backend modal`, `streamfm_eval.py` delegates internally to
+`evaluation/modal_streamfm_eval.py` — there is no need to call the Modal wrapper directly.
 
-Paramètres principaux :
+Main options:
 
-- `--backend` / `--local` : local ou Modal.
-- `--hardware` : même logique que pour les benchmarks.
-- `--task` : modèle à charger.
-- `--config-name` : override du nom de config Hydra.
-- `--ckpt` : chemin ou nom du checkpoint.
-- `--split` : `train`, `valid` ou `test`.
-- `--data-path` / `--data-format` : override du dataset et du format de données.
-- `--part` : `model` ou `predictor`.
-- `--pipeline` : actuellement `offline`.
-- `--execution` : `eager`, `compiled`, `cuda_graph`.
-- `--solver` : solveur ODE, par exemple `euler` ou `5xeuler`.
-- `--steps` : nombre de pas du solveur.
-- `--limit` / `--offset` : limiter ou décaler le sous-ensemble traité.
-- `--selection` : `first` (ordre du dataset) ou `random` (répétable via `--selection-seed`).
-- `--seed` : graine globale.
-- `--dtype` : `fp32`, `fp16`, `bf16`.
-- `--crop-mode` : `full` pour des fichiers complets, ou `config` pour la durée définie dans la config.
-- `--memory-format`, `--num-threads`, `--num-interop-threads` : réglages de calcul.
-- `--output-dir` / `--run-name` : dossier de sortie et nom du run.
-- `--overwrite` : écraser un run déjà existant.
-- `--save-inputs` : sauvegarder les versions clean/noisy.
-- `--continue-on-error` : continuer même si un fichier échoue.
-- `--score-after-run` : déclencher automatiquement le scoring après l’évaluation.
-- `--score-with-distillmos` / `--score-include-stats` / `--score-include-per-file` / `--score-target` : options de scoring.
-- `--local-log-dir` / `--no-local-log` : contrôle des métadonnées locales copiées dans `outputs/evaluation_logs/`.
+- `--backend` / `--local` — local or Modal.
+- `--hardware` — same logic as for benchmarks.
+- `--task` — which model to load (`stftpr`, `se`, `bwe`, `derev`, `lyra`, `melflow`).
+- `--config-name` — override the Hydra config name.
+- `--ckpt` — checkpoint path or name.
+- `--split` — `train`, `valid` or `test`.
+- `--data-path` / `--data-format` — override the dataset and its layout.
+- `--part` — `model` or `predictor`.
+- `--pipeline` — currently `offline`.
+- `--execution` — `eager`, `compiled`, `cuda_graph`.
+- `--solver` — ODE solver, e.g. `euler` or `5xeuler`.
+- `--steps` — number of solver steps.
+- `--limit` / `--offset` — limit or shift the processed subset.
+- `--selection` — `first` (dataset order) or `random` (repeatable via `--selection-seed`).
+- `--seed` — global seed.
+- `--dtype` — `fp32`, `fp16`, `bf16`.
+- `--crop-mode` — `full` for whole files, or `config` for the duration set in the config.
+- `--memory-format`, `--num-threads`, `--num-interop-threads` — compute settings.
+- `--output-dir` / `--run-name` — output directory and run name.
+- `--overwrite` — overwrite an existing run.
+- `--save-inputs` — also save the clean/noisy versions.
+- `--continue-on-error` — keep going when a file fails.
+- `--score-after-run` — trigger scoring automatically once inference finishes.
+- `--score-with-distillmos` / `--score-include-stats` / `--score-include-per-file` /
+  `--score-target` — scoring options.
+- `--local-log-dir` / `--no-local-log` — control the local metadata copies.
 
-Les artefacts de sortie sont stockés sous `outputs/eval_runs/<run-name>/` et les
-copies locales de métadonnées sous `outputs/evaluation_logs/<run-name>/`
-(`command.json`, `summary.json`, `manifest.json`, `config.yaml`).
+Output artifacts land under `outputs/eval_runs/<run-name>/`, and local metadata copies under
+`outputs/evaluation_logs/<run-name>/` (`command.json`, `summary.json`, `manifest.json`,
+`config.yaml`).
 
-### 3. Calculer les métriques à partir d’un manifest ou d’un dataset
+## 3. Compute the metrics
 
-Exemple à partir d’un run d’évaluation :
+From an evaluation run:
 
 ```bash
 python experiments/evaluation/scoring/score_manifest.py \
@@ -250,7 +258,7 @@ python experiments/evaluation/scoring/score_manifest.py \
   --output-json outputs/evaluation_logs/demo_run/metrics.json
 ```
 
-Exemple à partir d’un dataset brut :
+From a raw dataset (to score the degraded baseline itself):
 
 ```bash
 python experiments/evaluation/scoring/score_manifest.py \
@@ -265,59 +273,67 @@ python experiments/evaluation/scoring/score_manifest.py \
   --output-json outputs/evaluation_logs/dataset_scores/stftpr_test.json
 ```
 
-Paramètres principaux :
+Main options:
 
-- `manifest` : chemin vers un `manifest.json` produit par l’évaluation, ou omis si vous passez `--run-name`.
-- `--source` : `manifest` (par défaut) ou `dataset`.
-- `--run-name` : nom du run sous `outputs/eval_runs/`.
-- `--limit` / `--offset` : sous-échantillonnage des fichiers à scorer.
-- `--selection` / `--selection-seed` : même logique que pour l’évaluation.
-- `--task`, `--split`, `--data-path`, `--data-format` : contexte du dataset.
-- `--crop-mode` : `full` ou `config`.
-- `--with-distillmos` : active DistillMOS si le package est installé.
-- `--output-json` : chemin du JSON de sortie.
-- `--score-target` : `enhanced` (par défaut) ou `noisy`.
-- `--include-stats` : ajoute les statistiques globales (`mean`, `min`, `median`, `max`).
-- `--include-per-file` : ajoute la liste des métriques par fichier.
-- `--local-log-dir` / `--no-local-log` : contrôle des copies de logs locales.
+- `manifest` — path to a `manifest.json` produced by an evaluation run, or omitted if you pass
+  `--run-name`.
+- `--source` — `manifest` (default) or `dataset`.
+- `--run-name` — run name under `outputs/eval_runs/`.
+- `--limit` / `--offset` — subsample the files to score.
+- `--selection` / `--selection-seed` — same logic as for evaluation.
+- `--task`, `--split`, `--data-path`, `--data-format` — dataset context.
+- `--crop-mode` — `full` or `config`.
+- `--with-distillmos` — enable DistillMOS if the package is installed.
+- `--output-json` — output JSON path.
+- `--score-target` — `enhanced` (default) or `noisy`.
+- `--include-stats` — add global statistics (`mean`, `min`, `median`, `max`).
+- `--include-per-file` — add the per-file metric list.
+- `--local-log-dir` / `--no-local-log` — control the local log copies.
 
-Les métriques calculées sont : SI-SDR, ESTOI, LSD, PSNR, PESQ, et éventuellement
-DistillMOS si demandé. Les scores par fichier (`--include-per-file`) alimentent
-l'analyse de convergence [evaluation/scoring/subset_convergence.py](evaluation/scoring/subset_convergence.py).
+Computed metrics: SI-SDR, ESTOI, LSD, PSNR, PESQ, and optionally DistillMOS. The per-file
+scores (`--include-per-file`) feed the convergence analysis in
+[evaluation/scoring/subset_convergence.py](evaluation/scoring/subset_convergence.py).
 
-### 4. Lancer une grille d'évaluations avec métriques
+## 4. Run a grid of evaluations with metrics
 
-Le fichier `evaluation/sweeps/configs/sweep.yaml` décrit une grille locale avec les mêmes règles `exclude` que le sweep de benchmark. Le script est lancé depuis le Mac ; chaque essai peut néanmoins utiliser `backend: modal`. Il exécute l'inférence, le scoring, puis crée un run W&B par combinaison.
+`evaluation/sweeps/configs/sweep.yaml` describes a grid with the same `exclude` rules as the
+benchmark sweep. The script is launched from the local machine; each trial can nevertheless use
+`backend: modal`. It runs inference, then scoring, then creates one W&B run per combination.
 
-Toujours vérifier la grille avant de la lancer :
+Always inspect the grid before launching it:
 
 ```bash
-.venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+python experiments/evaluation/sweeps/run_eval_sweep.py \
   --sweep-yaml experiments/evaluation/sweeps/configs/sweep.yaml \
   --dry-run
 ```
 
-Puis lancer la grille avec un nom stable, qui permet aussi de reprendre les essais déjà scorés :
+Then launch it with a stable group name, which also lets you resume trials that were already
+scored:
 
 ```bash
-.venv/bin/python experiments/evaluation/sweeps/run_eval_sweep.py \
+python experiments/evaluation/sweeps/run_eval_sweep.py \
   --sweep-yaml experiments/evaluation/sweeps/configs/sweep.yaml \
   --group quality-ablation-v1 \
   --resume
 ```
 
-Les variantes nommées (`baseline`, `quant_int8`, `svd_50`, etc.) se définissent dans `presets`. Chaque preset peut choisir son `config_name`, son `ckpt` et une liste de `config_overrides`. Les paramètres inconnus sont refusés afin d'éviter qu'une option de compression soit seulement journalisée sans être réellement appliquée au modèle.
+Named variants (`baseline`, `quant_int8`, `svd_50`, …) are defined under `presets`. Each preset
+picks its own `config_name`, `ckpt` and list of `config_overrides`. Unknown parameters are
+rejected, so a compression option can never be merely logged without actually being applied to
+the model.
 
-### PTQ INT8
+## 5. INT8 post-training quantization
 
-Post-training INT8 est branché sur les benchmarks via `--ptq-int8`. Côté CPU (quantization native PyTorch, composants séparés par des virgules) :
+PTQ INT8 is wired into the benchmarks through `--ptq-int8`. On CPU (native PyTorch
+quantization, components comma-separated):
 
-- `linear` — dynamic INT8 sur les `nn.Linear`
-- `conv` — static INT8 sur les `nn.Conv2d` plaines (ex. depthwise/pointwise après SVD)
-- `causal_conv` — static INT8 sur `CausalConv2d` (wrapper streaming)
-- `all` — les trois
+- `linear` — dynamic INT8 on `nn.Linear`
+- `conv` — static INT8 on plain `nn.Conv2d` (e.g. depthwise/pointwise after SVD)
+- `causal_conv` — static INT8 on `CausalConv2d` (the streaming wrapper)
+- `all` — all three
 
-Contraintes : **CPU**, **fp32**, **eager**. Exemple :
+Constraints: **CPU**, **fp32**, **eager**.
 
 ```bash
 python experiments/benchmarks/streamfm_benchmark.py --local --hardware cpu \
@@ -326,9 +342,9 @@ python experiments/benchmarks/streamfm_benchmark.py --local --hardware cpu \
   --num-threads 1 --num-interop-threads 1
 ```
 
-Côté GPU, l'INT8 passe par TensorRT (calibration ModelOpt) : `--ptq-int8 tensorrt`
-avec `--execution tensorrt` ou `tensorrt_cuda_graph`, et `--dtype fp32` (les
-entrées/sorties du moteur restent en fp32). Exemple :
+On GPU, INT8 goes through TensorRT with ModelOpt calibration: `--ptq-int8 tensorrt` together
+with `--execution tensorrt` or `tensorrt_cuda_graph`, and `--dtype fp32` (the engine's inputs
+and outputs stay fp32).
 
 ```bash
 python experiments/benchmarks/streamfm_benchmark.py --hardware l4 \
@@ -336,7 +352,7 @@ python experiments/benchmarks/streamfm_benchmark.py --hardware l4 \
   --dtype fp32 --ptq-int8 tensorrt --ptq-calib-steps 32
 ```
 
-Grille de smoke :
+Smoke grid:
 
 ```bash
 python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
@@ -344,12 +360,23 @@ python experiments/benchmarks/sweeps/run_benchmark_sweep_batch.py \
   --wandb-group local-cpu-ptq-int8
 ```
 
-### 5. Commandes de smoke test rapides
+## 6. Quick smoke tests
+
+No audio ships with the repository. `--pipeline audio` benchmarks generate synthetic audio when
+`--input-audio` points at nothing — equivalent for timing, since the model spends the same
+compute on every frame regardless of content:
+
+```bash
+python experiments/benchmarks/streamfm_benchmark.py --local --hardware auto --task stftpr --pipeline audio --execution eager --steps 1 --iterations 10 --warmup 2
+```
+
+The two scripts below need real speech: drop your own 16 kHz mono WAVs in `inputs/test_clips/`
+(the directory is git-ignored) or point them elsewhere.
 
 ```bash
 python experiments/inference/local.py --config-name streamfm_se_predgen +inpath=inputs/test_clips +outpath=outputs/local_inference +ckpt=checkpoints/streamfm_se_predgen.ckpt +solver=euler +device=auto
 ```
 
 ```bash
-python experiments/streaming/run_local.py --input inputs/test_clips/audio_43m28_10s.wav --output outputs/streaming_audio_local_stftpr.wav --json outputs/streaming_audio_local_stftpr.json
+python experiments/streaming/run_local.py --input inputs/test_clips/benchmark_input_10s.wav --output outputs/streaming_audio_local_stftpr.wav --json outputs/streaming_audio_local_stftpr.json
 ```
