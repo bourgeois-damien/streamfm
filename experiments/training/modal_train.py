@@ -33,6 +33,13 @@ def _find_repo_root() -> Path:
     for candidate in (current_file.parent, *current_file.parents):
         if (candidate / "config").is_dir() and (candidate / "sgmse").is_dir():
             return candidate
+    # Inside a Modal container this module is imported from /root, detached from
+    # the repository the image bakes at REMOTE_ROOT.  The paths below this call
+    # are only read while building the image, which a container never does, so
+    # pointing them at the baked copy keeps the import working.
+    remote_root = Path(REMOTE_ROOT)
+    if (remote_root / "config").is_dir() and (remote_root / "sgmse").is_dir():
+        return remote_root
     raise RuntimeError("Could not find the StreamFM repository root.")
 
 
@@ -275,8 +282,18 @@ def _run_training(
     }
 
 
+# The audio pipeline decodes and STFTs every pair on the CPU, so a container
+# left on the default single core starves the GPU: sampling nvidia-smi during a
+# run showed it idle roughly four fifths of the time.  These functions therefore
+# ask for enough cores to keep the dataloader workers ahead of the GPU.
+TRAINING_CPU = 16.0
+TRAINING_MEMORY = 32768
+
+
 @app.function(
     gpu="L4",
+    cpu=TRAINING_CPU,
+    memory=TRAINING_MEMORY,
     timeout=24 * 60 * 60,
     retries=2,
     volumes={DATA_ROOT: DATA_VOLUME, RUNS_ROOT: RUNS_VOLUME},
@@ -288,6 +305,8 @@ def train_l4(**kwargs):
 
 @app.function(
     gpu="L40S",
+    cpu=TRAINING_CPU,
+    memory=TRAINING_MEMORY,
     timeout=24 * 60 * 60,
     retries=2,
     volumes={DATA_ROOT: DATA_VOLUME, RUNS_ROOT: RUNS_VOLUME},
@@ -299,6 +318,8 @@ def train_l40s(**kwargs):
 
 @app.function(
     gpu="A100",
+    cpu=TRAINING_CPU,
+    memory=TRAINING_MEMORY,
     timeout=24 * 60 * 60,
     retries=2,
     volumes={DATA_ROOT: DATA_VOLUME, RUNS_ROOT: RUNS_VOLUME},
@@ -310,6 +331,8 @@ def train_a100(**kwargs):
 
 @app.function(
     gpu="A100:2",
+    cpu=2 * TRAINING_CPU,
+    memory=2 * TRAINING_MEMORY,
     timeout=24 * 60 * 60,
     retries=2,
     volumes={DATA_ROOT: DATA_VOLUME, RUNS_ROOT: RUNS_VOLUME},
@@ -317,6 +340,28 @@ def train_a100(**kwargs):
 )
 def train_a100_2x(**kwargs):
     return _run_training(hardware="A100", devices=2, **kwargs)
+
+
+# Cost-tuned variant for long heals.  Throughput here is set by the dataloader
+# at roughly num_workers/15 it/s, so cores buy speed and the GPU only caps it:
+# 12 workers yield ~0.80 it/s against an L40S ceiling near 0.83.  Matching the
+# two means neither side idles, which lands cheaper per step than the 2xA100
+# function while costing well under half as much per hour.
+TRAINING_CPU_LEAN = 12.0
+TRAINING_MEMORY_LEAN = 24576
+
+
+@app.function(
+    gpu="L40S",
+    cpu=TRAINING_CPU_LEAN,
+    memory=TRAINING_MEMORY_LEAN,
+    timeout=24 * 60 * 60,
+    retries=2,
+    volumes={DATA_ROOT: DATA_VOLUME, RUNS_ROOT: RUNS_VOLUME},
+    secrets=[WANDB_SECRET],
+)
+def train_l40s_lean(**kwargs):
+    return _run_training(hardware="L40S", devices=1, **kwargs)
 
 
 TRAIN_FUNCTIONS: dict[str, Callable] = {
