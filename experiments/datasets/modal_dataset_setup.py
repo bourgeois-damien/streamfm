@@ -117,9 +117,11 @@ def _install_reverb_dependencies() -> None:
     """Install dependencies only needed by generate_ears_reverb.py."""
     packages = [
         "mat73==0.65",
-        # The upstream generation script imports `sofa`.
+        # The upstream generation script imports `sofa`, which comes from
+        # python-sofa. The bare `sofa` distribution on PyPI is an unrelated
+        # package whose pyDNS dependency is Python 2 only and fails to build.
         # Keep this runtime-scoped so EARS-WHAM setup is not blocked by SOFA packaging changes.
-        "sofa",
+        "python-sofa==0.2.0",
     ]
     _run([sys.executable, "-m", "pip", "install", *packages])
 
