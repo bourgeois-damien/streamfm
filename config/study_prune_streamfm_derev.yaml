@@ -1,0 +1,40 @@
+# Structured depth pruning of the derev model: drop the least-influential
+# iso-channel residual blocks (ranked by experiments/pruning/block_influence.py),
+# then warm-start from the teacher checkpoint and heal with a short fine-tune.
+#
+# Same warm-start+transform+finetune pattern as study_weightcomp_streamfm_melflow:
+#   build full model -> load teacher (strict) -> prune in-place -> fine-tune.
+defaults:
+  - _paths
+  - streamfm_derev
+  - _self_
+
+# Teacher checkpoint to warm-start from (full, unpruned derev model).
+load_model_from_ckpt: "checkpoints/streamfm_derev.ckpt"
+
+# Depth pruning: replace these residual blocks with StreamingIdentity.
+# Names are dotted paths relative to the backbone, as printed by
+# experiments/pruning/block_influence.py (least-influential blocks first).
+#
+# Ranking on the EARS-Reverb test set (BI = 1 - cos(x_in, x_out), lower = more
+# identity-like): the six least-influential blocks are all on the up path, with
+# a clear gap (BI < 0.20) before the down path. We drop the three lowest-BI ones,
+# which happen to be one per up level (lvl2/lvl1/lvl0), so no level loses all its
+# residual capacity. This is the k=3 point of the ablation and latency curves:
+# 1.038 ms/frame vs 1.138 for the teacher (-8.8%), PESQ 1.047 vs 1.608 zero-shot.
+transform_model_backbone_fn:
+  _target_: sgmse.backbones.streaming_unet.prune_resblocks_
+  _partial_: True
+  drop:
+    - up_modules.lvl2_rnb1   # BI 0.137
+    - up_modules.lvl1_rnb1   # BI 0.173
+    - up_modules.lvl0_rnb1   # BI 0.187
+
+model:
+  # low constant LR, no scheduling -- this is a short heal, not a retrain
+  lr: 5e-5
+  scheduler_config: !!null
+
+trainer_constructor:
+  max_steps: 25000
+  gradient_clip_val: !!null  # no grad clipping
