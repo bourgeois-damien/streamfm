@@ -268,6 +268,13 @@ class AudioDataModule(pl.LightningDataModule):
             self.train_set = AudioDataset(self.train_path, whichset='train', random_crop=True, **dataset_kwargs)
             self.valid_set = None
             self.test_set = None
+        if stage == '_valid_only':
+            # The 'fit' stage also builds the train set, so scoring a checkpoint on
+            # valid would require train_path to exist -- it does not on an inference
+            # machine that only has the split under evaluation.
+            self.valid_set = AudioDataset(self.valid_path, whichset='valid', random_crop=False, **dataset_kwargs)
+            self.train_set = None
+            self.test_set = None
 
     def train_dataloader(self):
         return DataLoader(
